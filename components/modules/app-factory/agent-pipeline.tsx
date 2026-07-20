@@ -128,7 +128,7 @@ export function RightPanel({
   const [project, setProject] = useState<{
     status: string; progress: number; qaScore: number | null;
     apkUrl: string | null; aabUrl: string | null; sourceUrl: string | null;
-    docsUrl: string | null; version: string; createdAt: string;
+    docsUrl: string | null; previewUrl: string | null; version: string; createdAt: string;
   } | null>(null);
 
   useEffect(() => {
@@ -156,6 +156,41 @@ export function RightPanel({
 
   return (
     <div className="space-y-4">
+      {/* Emulator — live web preview of the generated app in a phone frame */}
+      <div className="rounded-2xl border border-border bg-card/60 p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Smartphone className="h-4 w-4 text-primary" />
+            <span className="font-display text-sm font-semibold">Emulator</span>
+          </div>
+          {project?.previewUrl && (
+            <a href={project.previewUrl} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline">
+              Open ↗
+            </a>
+          )}
+        </div>
+        <div className="mx-auto w-full max-w-[240px]">
+          <div className="relative aspect-[9/19] overflow-hidden rounded-[2rem] border-[6px] border-foreground/80 bg-background shadow-lg">
+            {project?.previewUrl ? (
+              <iframe
+                key={project.previewUrl}
+                src={project.previewUrl}
+                title="App emulator"
+                className="h-full w-full border-0"
+                sandbox="allow-scripts allow-same-origin"
+              />
+            ) : (
+              <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-4 text-center text-xs text-muted-foreground">
+                <Smartphone className="h-6 w-6" />
+                {project && project.status !== 'completed' && project.status !== 'failed'
+                  ? 'Building the app… the emulator starts once the build finishes.'
+                  : 'Run a build to launch the app in the emulator.'}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* APK Ready card */}
       <div className={cn('rounded-2xl border p-5 transition', ready ? 'border-success/40 bg-success/5 glow' : 'border-border bg-card/60')}>
         <div className="flex items-center justify-between">
@@ -198,10 +233,8 @@ export function RightPanel({
       <div className="rounded-2xl border border-border bg-card/60 p-5">
         <div className="mb-3 font-display text-sm font-semibold">Downloads</div>
         <div className="grid grid-cols-2 gap-2">
-          <DownloadButton label="APK" icon={Download} href={project?.apkUrl} disabled={!ready} />
-          <DownloadButton label="AAB" icon={Package} href={project?.aabUrl} disabled={!ready} />
-          <DownloadButton label="Source" icon={FileText} href={project?.sourceUrl} disabled={!ready} />
-          <DownloadButton label="Docs" icon={FileText} href={project?.docsUrl} disabled={!ready} />
+          <DownloadButton label="APK" icon={Download} href={project?.apkUrl} disabled={!project?.apkUrl} />
+          <DownloadButton label="Source" icon={FileText} href={project?.sourceUrl} disabled={!project?.sourceUrl} />
         </div>
       </div>
     </div>

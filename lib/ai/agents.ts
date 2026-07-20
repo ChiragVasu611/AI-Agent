@@ -25,7 +25,7 @@ export const AGENTS: AgentSpec[] = [
   { id: 'analyzer', name: 'Analyzer Agent', description: 'Analyzes the reference app and extracts features, navigation, business flow, theme, permissions.', model: SUPER, icon: 'ScanSearch' },
   { id: 'planner', name: 'Planning Agent', description: 'Generates the project blueprint, feature list, folder structure, schema, API design, timeline.', model: ULTRA, icon: 'ListTree' },
   { id: 'designer', name: 'UI Designer Agent', description: 'Produces wireframes, screens, components, color palette, typography as Figma-style JSON.', model: SUPER, icon: 'PenTool' },
-  { id: 'coder', name: 'Code Generator Agent', description: 'Generates the full source code for Flutter / Android / iOS / React Native.', model: ULTRA, icon: 'Code2' },
+  { id: 'coder', name: 'Code Generator Agent', description: 'Generates the full source code for Flutter / Android / iOS / React Native.', model: SUPER, icon: 'Code2' },
   { id: 'builder', name: 'Build Agent', description: 'Compiles the project into APK / AAB / IPA and stores build logs and artifacts.', model: SUPER, icon: 'Hammer' },
   { id: 'emulator', name: 'Android Emulator', description: 'Launches the emulator, installs the APK, captures screenshots and crash logs.', model: SUPER, icon: 'Smartphone' },
   { id: 'qa', name: 'QA Automation Agent', description: 'Performs crash, navigation, API, accessibility, performance, security, memory, battery testing.', model: ULTRA, icon: 'ShieldCheck' },
