@@ -7,6 +7,7 @@ import { Credits } from '@/lib/mongodb/models/Credits';
 import {
   hashPassword, verifyPassword, signSessionToken, setSessionCookie, clearSessionCookie, getCurrentUser,
 } from './session';
+import { roleHome } from '@/lib/auth/permissions';
 
 export async function signUp(email: string, password: string, fullName: string) {
   await connectToDatabase();
@@ -15,13 +16,13 @@ export async function signUp(email: string, password: string, fullName: string) 
   if (existing) return { error: 'An account with this email already exists.' };
 
   const passwordHash = await hashPassword(password);
-  const user = await User.create({ email: email.toLowerCase(), passwordHash, fullName, role: 'user' });
+  const user = await User.create({ email: email.toLowerCase(), passwordHash, fullName, role: 'employee' });
   await Credits.create({ userId: user._id, balance: 100 });
 
-  const token = await signSessionToken(String(user._id));
+  const token = await signSessionToken(String(user._id), user.role);
   await setSessionCookie(token);
 
-  return { success: true };
+  return { success: true, redirectTo: roleHome(user.role) };
 }
 
 export async function signIn(email: string, password: string) {
@@ -33,10 +34,10 @@ export async function signIn(email: string, password: string) {
   const valid = await verifyPassword(password, user.passwordHash);
   if (!valid) return { error: 'Invalid email or password.' };
 
-  const token = await signSessionToken(String(user._id));
+  const token = await signSessionToken(String(user._id), user.role);
   await setSessionCookie(token);
 
-  return { success: true };
+  return { success: true, redirectTo: roleHome(user.role) };
 }
 
 export async function signOut() {

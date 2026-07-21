@@ -4,7 +4,7 @@ import { useState, useTransition } from 'react';
 import { Loader2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
-import { uploadResumes } from '@/app/dashboard/hr/actions';
+import { uploadResumes } from '@/app/hr/actions';
 import { Button } from '@/components/ui/button';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,

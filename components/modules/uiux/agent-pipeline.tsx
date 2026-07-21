@@ -113,7 +113,7 @@ export function DesignAgentPipeline({ projectId, active }: { projectId: string |
             animate={{ opacity: 1, x: 0 }}
             transition={{ delay: i * 0.04 }}
           >
-            <Link href={`/dashboard/uiux/${projectId}?tab=${agent.id}`} className={className}>
+            <Link href={`/designer/${projectId}?tab=${agent.id}`} className={className}>
               {content}
             </Link>
           </motion.div>
@@ -237,7 +237,7 @@ function ViewButton({
   const disabled = !projectId;
   return (
     <Link
-      href={disabled ? '#' : `/dashboard/uiux/${projectId}?tab=${tab}`}
+      href={disabled ? '#' : `/designer/${projectId}?tab=${tab}`}
       aria-disabled={disabled}
       className={cn(
         'flex items-center justify-center gap-2 rounded-lg border border-border px-3 py-2.5 text-xs font-medium transition',

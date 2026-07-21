@@ -365,6 +365,137 @@ export interface Profile {
   id: string;
   email: string;
   fullName: string | null;
-  role: 'admin' | 'user' | 'manager';
+  role: import('./auth/permissions').Role;
   createdAt: string;
+}
+
+export type QaSourceType =
+  | 'apk' | 'ipa' | 'flutter' | 'react_native' | 'hybrid' | 'web_app'
+  | 'play_store_url' | 'app_store_url' | 'web_url';
+
+export type QaPlatform = 'android' | 'ios' | 'web' | 'cross_platform';
+
+export interface QaProject {
+  id: string;
+  userId: string;
+  name: string;
+  sourceType: QaSourceType;
+  sourceRef: string;
+  platform: QaPlatform;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type QaRunStatus = 'queued' | 'running' | 'passed' | 'failed' | 'partial' | 'cancelled';
+
+export interface QaTestRun {
+  id: string;
+  userId: string;
+  projectId: string;
+  modules: string[];
+  status: QaRunStatus;
+  progress: number;
+  runNumber: number;
+  runName: string;
+  buildVersion: string;
+  executedByName: string;
+  currentSuite: string | null;
+  currentCase: string | null;
+  currentStep: string | null;
+  currentScreen: string | null;
+  currentFeature: string | null;
+  currentDevice: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  estimatedSeconds: number | null;
+  totalCases: number;
+  passedCases: number;
+  failedCases: number;
+  performanceScore: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  project?: QaProject;
+}
+
+export type QaBugType =
+  | 'functional' | 'ui' | 'api' | 'security' | 'performance' | 'memory' | 'battery'
+  | 'network' | 'accessibility' | 'compatibility' | 'crash' | 'anr';
+
+export type QaSeverity = 'critical' | 'high' | 'medium' | 'low';
+export type QaPriority = 'p1' | 'p2' | 'p3' | 'p4';
+
+export interface QaBug {
+  id: string;
+  userId: string;
+  projectId: string;
+  runId: string;
+  type: QaBugType;
+  module: string;
+  severity: QaSeverity;
+  priority: QaPriority;
+  bugNumber: string;
+  feature: string;
+  testCaseId: string;
+  failedStepNumber: number | null;
+  title: string;
+  description: string;
+  screenName: string;
+  stepsToReproduce: string[];
+  expectedResult: string;
+  actualResult: string;
+  screenshotDataUrl: string | null;
+  logs: string;
+  stackTrace: string | null;
+  apiRequest: string | null;
+  apiResponse: string | null;
+  deviceInfo: string;
+  osVersion: string;
+  appVersion: string;
+  aiRootCause: string;
+  suggestedFix: string;
+  status: 'open' | 'resolved' | 'ignored';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QaTestCaseResult {
+  id: string;
+  runId: string;
+  testCaseId: string;
+  name: string;
+  module: string;
+  screen: string;
+  result: 'pass' | 'fail';
+  failedStepNumber: number | null;
+  bugId: string | null;
+  createdAt: string;
+}
+
+export interface QaLogEntry {
+  id: string;
+  runId: string;
+  source: 'automation' | 'logcat' | 'api' | 'error' | 'crash';
+  level: 'debug' | 'info' | 'warn' | 'error';
+  message: string;
+  createdAt: string;
+}
+
+export interface QaScreenshot {
+  id: string;
+  runId: string;
+  screenName: string;
+  testStep: string;
+  imageDataUrl: string;
+  createdAt: string;
+}
+
+export interface QaDeviceInfo {
+  id: string;
+  name: string;
+  type: 'real_android' | 'emulator_android' | 'real_ios' | 'simulator_ios';
+  osVersion: string;
+  status: 'online' | 'offline' | 'busy';
+  battery: number | null;
+  isStub: true;
 }

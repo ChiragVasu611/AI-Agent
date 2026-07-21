@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { Loader2, LogIn } from 'lucide-react';
@@ -13,9 +13,8 @@ import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 
 export default function LoginPage() {
-  const router = useRouter();
   const params = useSearchParams();
-  const redirect = params.get('redirect') || '/dashboard';
+  const explicitRedirect = params.get('redirect');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -23,15 +22,18 @@ export default function LoginPage() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    const { error } = await signIn(email, password);
+    const result = await signIn(email, password);
     setLoading(false);
-    if (error) {
-      toast.error(error);
+    if (result.error) {
+      toast.error(result.error);
       return;
     }
     toast.success('Welcome back');
-    router.push(redirect);
-    router.refresh();
+    // Full page navigation (not router.push) so every client-side context —
+    // especially the auth provider, which only fetches /api/auth/me once on
+    // mount — remounts fresh. Otherwise switching accounts in one tab leaves
+    // the previous user's identity showing in the topbar/sidebar.
+    window.location.assign(explicitRedirect || result.redirectTo || '/dashboard');
   }
 
   return (

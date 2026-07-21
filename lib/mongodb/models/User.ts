@@ -4,9 +4,15 @@ const userSchema = new Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   passwordHash: { type: String, required: true },
   fullName: { type: String, default: '' },
-  role: { type: String, enum: ['admin', 'user', 'manager'], default: 'user' },
+  role: {
+    type: String,
+    enum: ['super_admin', 'company_admin', 'hr', 'qa', 'developer', 'designer', 'marketing', 'finance', 'employee', 'guest'],
+    default: 'employee',
+  },
   resetToken: { type: String, default: null },
   resetTokenExpires: { type: Date, default: null },
+  qaOpenRouterApiKey: { type: String, default: null },
+  qaApiKeyTier: { type: String, enum: ['free', 'paid', null], default: null },
 }, { timestamps: true });
 
 export type UserDoc = InferSchemaType<typeof userSchema>;

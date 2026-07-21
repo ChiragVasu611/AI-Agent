@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { GripVertical, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
-import { moveApplicationStage } from '@/app/dashboard/hr/actions';
+import { moveApplicationStage } from '@/app/hr/actions';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import type { Application, ApplicationStage } from '@/lib/types';
@@ -93,7 +93,7 @@ export function PipelineBoard({ jobId }: { jobId: string }) {
                   className="animate-in fade-in cursor-grab rounded-lg border border-border bg-card p-2.5 duration-200 active:cursor-grabbing"
                 >
                   <div className="flex items-start justify-between gap-1">
-                    <Link href={`/dashboard/hr/candidates/${app.candidateId}`} className="min-w-0 flex-1 truncate text-xs font-medium hover:text-primary">
+                    <Link href={`/hr/candidates/${app.candidateId}`} className="min-w-0 flex-1 truncate text-xs font-medium hover:text-primary">
                       {app.candidate?.name ?? 'Unknown candidate'}
                     </Link>
                     <GripVertical className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -111,7 +111,7 @@ export function PipelineBoard({ jobId }: { jobId: string }) {
                   )}
                   {(stage.id === 'hr_interview' || stage.id === 'technical_interview' || stage.id === 'final_interview') && (
                     <Link
-                      href={`/dashboard/hr/interviews/${app.id}`}
+                      href={`/hr/interviews/${app.id}`}
                       className="mt-1.5 block text-center text-[10px] font-medium text-primary hover:underline"
                     >
                       Open Interview →

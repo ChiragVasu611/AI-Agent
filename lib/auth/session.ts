@@ -3,6 +3,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import bcrypt from 'bcryptjs';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { User } from '@/lib/mongodb/models/User';
+import { permissionsForRole } from '@/lib/auth/permissions';
 
 const SESSION_COOKIE = 'session';
 const secret = new TextEncoder().encode(process.env.AUTH_SECRET ?? 'dev-only-insecure-secret-change-me');
@@ -12,6 +13,7 @@ export interface SessionUser {
   email: string;
   fullName: string;
   role: string;
+  permissions: string[];
 }
 
 export async function hashPassword(password: string) {
@@ -22,8 +24,15 @@ export async function verifyPassword(password: string, hash: string) {
   return bcrypt.compare(password, hash);
 }
 
-export async function signSessionToken(userId: string) {
-  return new SignJWT({ sub: userId })
+/**
+ * The `role` claim lets Edge middleware route-gate without a DB round-trip.
+ * It's a point-in-time snapshot — changing a user's role only takes effect
+ * in middleware after they next sign in (server components always re-fetch
+ * the authoritative role from Mongo via getCurrentUser, so page-level
+ * enforcement is never stale).
+ */
+export async function signSessionToken(userId: string, role: string) {
+  return new SignJWT({ sub: userId, role })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime('30d')
@@ -65,10 +74,12 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   }>();
   if (!user) return null;
 
+  const role = user.role ?? 'employee';
   return {
     id: String(user._id),
     email: user.email,
     fullName: user.fullName ?? '',
-    role: user.role ?? 'user',
+    role,
+    permissions: permissionsForRole(role),
   };
 }

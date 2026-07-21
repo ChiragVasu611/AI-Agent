@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Loader2, UserPlus } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -13,7 +12,6 @@ import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 
 export default function SignupPage() {
-  const router = useRouter();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -26,15 +24,14 @@ export default function SignupPage() {
       return;
     }
     setLoading(true);
-    const { error } = await signUp(email, password, name);
+    const result = await signUp(email, password, name);
     setLoading(false);
-    if (error) {
-      toast.error(error);
+    if (result.error) {
+      toast.error(result.error);
       return;
     }
     toast.success('Account created');
-    router.push('/dashboard');
-    router.refresh();
+    window.location.assign(result.redirectTo || '/dashboard');
   }
 
   return (

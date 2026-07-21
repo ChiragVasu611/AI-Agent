@@ -7,6 +7,7 @@ export interface SessionUser {
   email: string;
   fullName: string;
   role: string;
+  permissions: string[];
 }
 
 interface AuthContextValue {

@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import {
   CheckCircle2, Clock, FileText, Pause, Play, RotateCcw, Sparkles,
 } from 'lucide-react';
-import { submitInterviewFeedback } from '@/app/dashboard/hr/actions';
+import { submitInterviewFeedback } from '@/app/hr/actions';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';

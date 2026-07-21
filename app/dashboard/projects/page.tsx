@@ -22,7 +22,7 @@ export default async function ProjectsPage() {
           <h1 className="font-display text-2xl font-semibold tracking-tight">Projects</h1>
           <p className="text-sm text-muted-foreground">Every build across all AI modules.</p>
         </div>
-        <Link href="/dashboard/app-factory" className="text-sm font-medium text-primary hover:underline">
+        <Link href="/app-factory" className="text-sm font-medium text-primary hover:underline">
           New build
         </Link>
       </div>
@@ -31,7 +31,7 @@ export default async function ProjectsPage() {
         {projects.length > 0 ? (
           <div className="divide-y divide-border">
             {projects.map((p) => (
-              <Link key={p.id} href="/dashboard/app-factory" className="flex items-center gap-4 px-5 py-4 transition hover:bg-secondary/50">
+              <Link key={p.id} href="/app-factory" className="flex items-center gap-4 px-5 py-4 transition hover:bg-secondary/50">
                 <div className="grid h-9 w-9 place-items-center rounded-lg bg-secondary text-muted-foreground">
                   <Bot className="h-4 w-4" />
                 </div>
@@ -51,7 +51,7 @@ export default async function ProjectsPage() {
           <div className="flex flex-col items-center gap-2 py-16 text-center">
             <Bot className="h-8 w-8 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">No projects yet.</p>
-            <Link href="/dashboard/app-factory" className="text-sm font-medium text-primary hover:underline">
+            <Link href="/app-factory" className="text-sm font-medium text-primary hover:underline">
               Launch your first build →
             </Link>
           </div>

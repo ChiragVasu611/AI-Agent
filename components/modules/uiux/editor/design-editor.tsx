@@ -216,7 +216,7 @@ export function DesignEditor({
     <div className="flex h-screen flex-col bg-background">
       {/* Top bar */}
       <div className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card/60 px-4">
-        <Link href={`/dashboard/uiux/${projectId}`} className="text-muted-foreground transition hover:text-foreground">
+        <Link href={`/designer/${projectId}`} className="text-muted-foreground transition hover:text-foreground">
           <ArrowLeft className="h-5 w-5" />
         </Link>
         <span className="truncate text-sm font-medium">{projectName}</span>

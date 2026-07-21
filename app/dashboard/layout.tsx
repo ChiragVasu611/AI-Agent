@@ -1,11 +1,9 @@
-import { redirect } from 'next/navigation';
-import { getCurrentUser } from '@/lib/auth/session';
+import { requireWorkspace } from '@/lib/auth/require-workspace';
 import { Sidebar } from '@/components/dashboard/sidebar';
 import { Topbar } from '@/components/dashboard/topbar';
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const user = await getCurrentUser();
-  if (!user) redirect('/login');
+  await requireWorkspace('workspace:enterprise');
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">

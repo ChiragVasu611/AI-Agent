@@ -1,5 +1,6 @@
 import { jwtVerify } from 'jose';
 import { NextResponse, type NextRequest } from 'next/server';
+import { permissionForPath, permissionsForRole, hasPermission, roleHome } from '@/lib/auth/permissions';
 
 const PUBLIC_PATHS = ['/', '/login', '/signup', '/forgot-password', '/reset-password'];
 
@@ -9,37 +10,45 @@ function isPublic(path: string) {
   return PUBLIC_PATHS.some((p) => path === p || path.startsWith(p + '/'));
 }
 
-async function hasValidSession(req: NextRequest) {
+async function readSession(req: NextRequest): Promise<{ role: string } | null> {
   const token = req.cookies.get('session')?.value;
-  if (!token) return false;
+  if (!token) return null;
   try {
-    await jwtVerify(token, secret);
-    return true;
+    const { payload } = await jwtVerify(token, secret);
+    return typeof payload.role === 'string' ? { role: payload.role } : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
-  const res = NextResponse.next({ request: { headers: req.headers } });
+  const session = await readSession(req);
 
-  const authed = await hasValidSession(req);
-
-  if (authed && isPublic(pathname)) {
+  if (session && isPublic(pathname)) {
     const url = req.nextUrl.clone();
-    url.pathname = '/dashboard';
+    url.pathname = roleHome(session.role);
     return NextResponse.redirect(url);
   }
 
-  if (!authed && (pathname === '/dashboard' || pathname.startsWith('/dashboard/'))) {
-    const url = req.nextUrl.clone();
-    url.pathname = '/login';
-    url.searchParams.set('redirect', pathname);
-    return NextResponse.redirect(url);
+  const requiredPermission = permissionForPath(pathname);
+  if (requiredPermission) {
+    if (!session) {
+      const url = req.nextUrl.clone();
+      url.pathname = '/login';
+      url.searchParams.set('redirect', pathname);
+      return NextResponse.redirect(url);
+    }
+
+    const perms = permissionsForRole(session.role);
+    if (!hasPermission(perms, requiredPermission)) {
+      const url = req.nextUrl.clone();
+      url.pathname = '/403';
+      return NextResponse.redirect(url);
+    }
   }
 
-  return res;
+  return NextResponse.next({ request: { headers: req.headers } });
 }
 
 export const config = {

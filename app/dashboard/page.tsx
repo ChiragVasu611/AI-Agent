@@ -13,47 +13,47 @@ const MODULES = [
   {
     name: 'AI App Factory',
     desc: 'Drop a reference app URL and let 8 autonomous agents build, test, and ship an APK.',
-    href: '/dashboard/app-factory',
+    href: '/app-factory',
     icon: Bot,
     accent: 'from-sky-500/20 to-blue-500/5',
     status: 'live' as const,
   },
   {
-    name: 'QA Automation Agent',
+    name: 'QA Workspace',
     desc: 'Crash, navigation, API, accessibility, performance, security, memory & battery testing.',
-    href: '/dashboard/qa',
+    href: '/qa',
     icon: ShieldCheck,
     accent: 'from-emerald-500/20 to-green-500/5',
     status: 'soon' as const,
   },
   {
-    name: 'AI HR Assistant',
+    name: 'HR Workspace',
     desc: 'Recruitment pipeline, AI resume screening, interview assistant, and an HR copilot.',
-    href: '/dashboard/hr',
+    href: '/hr',
     icon: Boxes,
     accent: 'from-amber-500/20 to-yellow-500/5',
     status: 'live' as const,
   },
   {
-    name: 'AI Marketing Agent',
+    name: 'Marketing Workspace',
     desc: 'Campaign generation, copywriting, and audience segmentation.',
-    href: '/dashboard/marketing',
+    href: '/marketing',
     icon: Sparkles,
     accent: 'from-pink-500/20 to-rose-500/5',
     status: 'soon' as const,
   },
   {
-    name: 'UI/UX AI Designer',
+    name: 'UI/UX Workspace',
     desc: 'Wireframes, design systems, and interactive prototypes from a brief.',
-    href: '/dashboard/uiux',
+    href: '/designer',
     icon: Layers,
     accent: 'from-cyan-500/20 to-teal-500/5',
     status: 'live' as const,
   },
   {
-    name: 'Future AI Modules',
-    desc: 'Plug-in new agents without touching existing core logic.',
-    href: '/dashboard/templates',
+    name: 'Finance Workspace',
+    desc: 'Budgets, payroll, and financial reporting.',
+    href: '/finance',
     icon: Cpu,
     accent: 'from-violet-500/20 to-purple-500/5',
     status: 'soon' as const,
@@ -97,7 +97,7 @@ export default async function DashboardHome() {
       <section>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="font-display text-xl font-semibold tracking-tight">AI Modules</h2>
-          <span className="text-xs text-muted-foreground">3 live · 2 coming soon</span>
+          <span className="text-xs text-muted-foreground">3 live · 3 coming soon</span>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {MODULES.map((m) => (
@@ -158,7 +158,7 @@ export default async function DashboardHome() {
             <div className="flex flex-col items-center justify-center gap-2 px-5 py-12 text-center">
               <Bot className="h-8 w-8 text-muted-foreground" />
               <p className="text-sm text-muted-foreground">No projects yet. Launch the App Factory to start building.</p>
-              <Link href="/dashboard/app-factory" className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline">
+              <Link href="/app-factory" className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline">
                 Open App Factory <ArrowRight className="h-4 w-4" />
               </Link>
             </div>
