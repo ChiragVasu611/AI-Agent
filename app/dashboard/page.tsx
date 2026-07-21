@@ -28,11 +28,11 @@ const MODULES = [
   },
   {
     name: 'AI HR Assistant',
-    desc: 'Screening, onboarding flows, policy Q&A, and candidate ranking.',
+    desc: 'Recruitment pipeline, AI resume screening, interview assistant, and an HR copilot.',
     href: '/dashboard/hr',
     icon: Boxes,
     accent: 'from-amber-500/20 to-yellow-500/5',
-    status: 'soon' as const,
+    status: 'live' as const,
   },
   {
     name: 'AI Marketing Agent',
@@ -48,7 +48,7 @@ const MODULES = [
     href: '/dashboard/uiux',
     icon: Layers,
     accent: 'from-cyan-500/20 to-teal-500/5',
-    status: 'soon' as const,
+    status: 'live' as const,
   },
   {
     name: 'Future AI Modules',
@@ -78,7 +78,7 @@ export default async function DashboardHome() {
     { label: 'Active Projects', value: projects.filter((p) => p.status !== 'completed' && p.status !== 'failed').length },
     { label: 'Completed Builds', value: projects.filter((p) => p.status === 'completed').length },
     { label: 'Credits Balance', value: credits?.balance ?? 100 },
-    { label: 'Agents Online', value: 8 },
+    { label: 'Agents Online', value: 16 },
   ];
 
   return (
@@ -97,7 +97,7 @@ export default async function DashboardHome() {
       <section>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="font-display text-xl font-semibold tracking-tight">AI Modules</h2>
-          <span className="text-xs text-muted-foreground">1 live · 4 coming soon</span>
+          <span className="text-xs text-muted-foreground">3 live · 2 coming soon</span>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {MODULES.map((m) => (

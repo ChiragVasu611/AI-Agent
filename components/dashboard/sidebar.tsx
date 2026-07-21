@@ -15,9 +15,9 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 const MODULES = [
   { name: 'App Factory', href: '/dashboard/app-factory', icon: Bot, status: 'live' },
   { name: 'QA Automation', href: '/dashboard/qa', icon: ShieldCheck, status: 'soon' },
-  { name: 'AI HR Assistant', href: '/dashboard/hr', icon: Boxes, status: 'soon' },
+  { name: 'AI HR Assistant', href: '/dashboard/hr', icon: Boxes, status: 'live' },
   { name: 'AI Marketing', href: '/dashboard/marketing', icon: Sparkles, status: 'soon' },
-  { name: 'UI/UX AI Designer', href: '/dashboard/uiux', icon: Workflow, status: 'soon' },
+  { name: 'UI/UX AI Designer', href: '/dashboard/uiux', icon: Workflow, status: 'live' },
 ];
 
 const NAV = [
