@@ -19,6 +19,8 @@ const projectSchema = new Schema({
   aabUrl: { type: String, default: null },
   sourceUrl: { type: String, default: null },
   docsUrl: { type: String, default: null },
+  previewUrl: { type: String, default: null },
+  buildLog: { type: String, default: null },
   releaseNotes: { type: String, default: null },
 }, { timestamps: true });
 

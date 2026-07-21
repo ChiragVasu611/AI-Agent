@@ -210,6 +210,8 @@ export interface Project {
   aabUrl: string | null;
   sourceUrl: string | null;
   docsUrl: string | null;
+  previewUrl: string | null;
+  buildLog: string | null;
   releaseNotes: string | null;
   createdAt: string;
   updatedAt: string;
