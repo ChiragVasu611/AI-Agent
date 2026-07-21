@@ -191,9 +191,14 @@ export type AgentName =
 
 export type RunStatus = 'pending' | 'running' | 'completed' | 'failed';
 
-export type Platform = 'flutter' | 'android' | 'ios' | 'react-native';
+// Native (bare Android/iOS) builds were removed — the factory ships
+// cross-platform apps only.
+export type Platform = 'flutter' | 'react-native';
 
 export type Store = 'google_play' | 'apple' | 'unknown';
+
+// Where a freshly-built app should run.
+export type RunTarget = 'emulator' | 'real-device' | 'auto';
 
 export interface Project {
   id: string;
@@ -211,6 +216,13 @@ export interface Project {
   sourceUrl: string | null;
   docsUrl: string | null;
   releaseNotes: string | null;
+  buildTimeMs: number | null;
+  fileCount: number | null;
+  testCasesTotal: number | null;
+  testCasesPassed: number | null;
+  emulatorStatus: string | null;
+  runTarget: RunTarget;
+  runSerial: string | null;
   createdAt: string;
   updatedAt: string;
 }

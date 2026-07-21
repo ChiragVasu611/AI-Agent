@@ -4,7 +4,7 @@ const projectSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   name: { type: String, required: true },
   referenceUrl: { type: String, required: true },
-  platform: { type: String, enum: ['flutter', 'android', 'ios', 'react-native'], required: true },
+  platform: { type: String, enum: ['flutter', 'react-native'], required: true },
   store: { type: String, enum: ['google_play', 'apple', 'unknown'], required: true },
   status: {
     type: String,
@@ -20,6 +20,13 @@ const projectSchema = new Schema({
   sourceUrl: { type: String, default: null },
   docsUrl: { type: String, default: null },
   releaseNotes: { type: String, default: null },
+  buildTimeMs: { type: Number, default: null },
+  fileCount: { type: Number, default: null },
+  testCasesTotal: { type: Number, default: null },
+  testCasesPassed: { type: Number, default: null },
+  emulatorStatus: { type: String, default: null },
+  runTarget: { type: String, enum: ['emulator', 'real-device', 'auto'], default: 'auto' },
+  runSerial: { type: String, default: null },
 }, { timestamps: true });
 
 export const Project = models.Project ?? model('Project', projectSchema);

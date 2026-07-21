@@ -6,7 +6,7 @@ import { connectToDatabase } from '@/lib/mongodb/connect';
 import { Project } from '@/lib/mongodb/models/Project';
 import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
 import { runPipeline } from '@/lib/ai/pipeline';
-import type { Platform, Store } from '@/lib/types';
+import type { Platform, RunTarget, Store } from '@/lib/types';
 
 function detectStore(url: string): Store {
   const u = url.toLowerCase();
@@ -29,6 +29,10 @@ export async function analyzeAndBuild(formData: FormData) {
   const platform = String(formData.get('platform') ?? 'flutter') as Platform;
   const googlePlay = String(formData.get('googlePlay') ?? '').trim();
   const appleStore = String(formData.get('appleStore') ?? '').trim();
+  const runTargetRaw = String(formData.get('runTarget') ?? 'auto');
+  const runTarget: RunTarget = (['emulator', 'real-device', 'auto'] as const).includes(runTargetRaw as RunTarget)
+    ? (runTargetRaw as RunTarget)
+    : 'auto';
 
   const primary = referenceUrl || googlePlay || appleStore;
   if (!primary) return { error: 'Provide a reference app URL.' };
@@ -50,6 +54,7 @@ export async function analyzeAndBuild(formData: FormData) {
     store,
     status: 'queued',
     progress: 0,
+    runTarget,
   });
 
   await ActivityLog.create({
@@ -69,6 +74,7 @@ export async function analyzeAndBuild(formData: FormData) {
     referenceUrl: primary,
     store,
     platform,
+    runTarget,
   }).catch((e) => console.error('pipeline error', e));
 
   return { projectId: String(project._id) };

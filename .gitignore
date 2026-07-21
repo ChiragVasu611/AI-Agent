@@ -15,6 +15,9 @@
 # production
 /build
 
+# App Factory generated projects / build artifacts
+/.factory-builds
+
 # misc
 .DS_Store
 *.pem
