@@ -4,12 +4,14 @@ import { ArrowLeft, Briefcase, Calendar, DollarSign, MapPin, Users } from 'lucid
 import { getCurrentUser } from '@/lib/auth/session';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { Job } from '@/lib/mongodb/models/Job';
+import { RecruitmentSourceSettings } from '@/lib/mongodb/models/RecruitmentSourceSettings';
 import { serializeDoc } from '@/lib/mongodb/serialize';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { UploadResumesDialog } from '@/components/modules/hr/upload-resumes-dialog';
 import { PipelineBoard } from '@/components/modules/hr/pipeline-board';
-import type { Job as JobType } from '@/lib/types';
+import { ApplyLinkButtons } from '@/components/modules/hr/apply-link-buttons';
+import type { Job as JobType, RecruitmentSourceSettings as SettingsType } from '@/lib/types';
 
 export default async function JobDetailPage({ params }: { params: { id: string } }) {
   const user = await getCurrentUser();
@@ -19,6 +21,9 @@ export default async function JobDetailPage({ params }: { params: { id: string }
   const doc = await Job.findOne({ _id: params.id, userId: user.id }).lean();
   if (!doc) notFound();
   const job = serializeDoc(doc) as JobType;
+
+  const settingsDoc = await RecruitmentSourceSettings.findOne({ userId: user.id }).lean();
+  const settings = settingsDoc ? (serializeDoc(settingsDoc) as SettingsType) : null;
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6 lg:p-8">
@@ -45,7 +50,10 @@ export default async function JobDetailPage({ params }: { params: { id: string }
             <span className="inline-flex items-center gap-1"><Users className="h-3.5 w-3.5" /> {job.openings} opening{job.openings === 1 ? '' : 's'}</span>
           </div>
         </div>
-        <UploadResumesDialog jobId={job.id} />
+        <div className="flex flex-col items-end gap-2">
+          <ApplyLinkButtons jobId={job.id} campaignName={settings?.linkedin.campaignName} />
+          <UploadResumesDialog jobId={job.id} />
+        </div>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">

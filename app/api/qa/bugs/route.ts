@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth/session';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaBug } from '@/lib/mongodb/models/QaBug';
+import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { serializeDoc } from '@/lib/mongodb/serialize';
 
 export async function GET(req: Request) {
@@ -16,6 +17,11 @@ export async function GET(req: Request) {
   const limit = Number(url.searchParams.get('limit') ?? '100');
 
   await connectToDatabase();
+
+  if (runId) {
+    const run = await QaTestRun.findOne({ _id: runId, userId: user.id }).lean();
+    if (!run) return NextResponse.json({ bugs: [] });
+  }
 
   const query: Record<string, unknown> = { userId: user.id };
   if (runId) query.runId = runId;

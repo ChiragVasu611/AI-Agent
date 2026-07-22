@@ -40,6 +40,13 @@ const applicationSchema = new Schema({
   flags: { type: flagsSchema, default: null },
   recommendation: { type: String, enum: ['strong_hire', 'hire', 'consider', 'reject', null], default: null },
   notes: { type: String, default: '' },
+  source: {
+    type: String,
+    enum: ['career_portal', 'linkedin', 'email', 'whatsapp', 'manual'],
+    default: 'manual',
+    index: true,
+  },
+  sourceMeta: { type: Schema.Types.Mixed, default: null },
 }, { timestamps: true });
 
 applicationSchema.index({ jobId: 1, candidateId: 1 }, { unique: true });

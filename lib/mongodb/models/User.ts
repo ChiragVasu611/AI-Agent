@@ -13,6 +13,9 @@ const userSchema = new Schema({
   resetTokenExpires: { type: Date, default: null },
   qaOpenRouterApiKey: { type: String, default: null },
   qaApiKeyTier: { type: String, enum: ['free', 'paid', null], default: null },
+  uiuxAiEnabled: { type: Boolean, default: true },
+  uiuxOpenRouterApiKey: { type: String, default: null },
+  uiuxApiKeyTier: { type: String, enum: ['free', 'paid', null], default: null },
 }, { timestamps: true });
 
 export type UserDoc = InferSchemaType<typeof userSchema>;

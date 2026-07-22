@@ -111,6 +111,89 @@ export interface ApplicationFlags {
   underqualified: boolean;
 }
 
+export interface CareerPortalSettings {
+  enabled: boolean;
+  portalUrl: string;
+  companyName: string;
+  companyLogoUrl: string;
+  resumeUploadEnabled: boolean;
+  supportedResumeTypes: string[];
+  maxResumeSizeMb: number;
+  defaultApplicationStatus: string;
+  autoResumeParsing: boolean;
+  autoAiScreening: boolean;
+}
+
+export interface LinkedinSourceSettings {
+  enabled: boolean;
+  companyPageUrl: string;
+  careersPageUrl: string;
+  defaultApplyUrl: string;
+  utmTrackingEnabled: boolean;
+  campaignName: string;
+  sourceName: string;
+}
+
+export interface EmailSourceSettings {
+  enabled: boolean;
+  emailAddress: string;
+  displayName: string;
+  protocol: 'imap' | 'pop3';
+  incomingServer: string;
+  port: number;
+  username: string;
+  password: string;
+  useSsl: boolean;
+  fetchIntervalMinutes: number;
+  inboxFolder: string;
+  allowedResumeTypes: string[];
+  maxAttachmentSizeMb: number;
+  autoResumeParsing: boolean;
+  autoCandidateCreation: boolean;
+  autoAiScreening: boolean;
+  duplicateDetection: boolean;
+  lastFetchedAt: string | null;
+  lastTestResult: string | null;
+  lastTestAt: string | null;
+}
+
+export interface WhatsappSourceSettings {
+  enabled: boolean;
+  whatsappNumber: string;
+  displayName: string;
+  inviteLink: string;
+  submissionInstructions: string;
+  welcomeMessage: string;
+  autoReply: boolean;
+  resumeProcessingEnabled: boolean;
+  supportedResumeTypes: string[];
+  maxFileSizeMb: number;
+  lastTestResult: string | null;
+  lastTestAt: string | null;
+}
+
+export interface RecruitmentSourceSettings {
+  id: string;
+  userId: string;
+  careerPortal: CareerPortalSettings;
+  linkedin: LinkedinSourceSettings;
+  email: EmailSourceSettings;
+  whatsapp: WhatsappSourceSettings;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ApplicationSource = 'career_portal' | 'linkedin' | 'email' | 'whatsapp' | 'manual';
+
+export interface ApplicationSourceMeta {
+  utmSource?: string;
+  utmCampaign?: string;
+  emailFrom?: string;
+  emailSubject?: string;
+  whatsappNumber?: string;
+  [key: string]: unknown;
+}
+
 export interface Application {
   id: string;
   userId: string;
@@ -122,6 +205,8 @@ export interface Application {
   flags: ApplicationFlags | null;
   recommendation: Recommendation;
   notes: string;
+  source: ApplicationSource;
+  sourceMeta: ApplicationSourceMeta | null;
   createdAt: string;
   updatedAt: string;
   candidate?: Candidate;
@@ -284,8 +369,35 @@ export interface DesignProject {
   prototypeUrl: string | null;
   handoffUrl: string | null;
   summary: string | null;
+  plan: DesignPlan | null;
+  aiEnhanced: boolean;
+  uxScore: number | null;
+  uiScore: number | null;
+  accessibilityScore: number | null;
+  consistencyScore: number | null;
+  responsiveScore: number | null;
+  reviewIssues: DesignReviewIssue[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DesignPlan {
+  productType: string;
+  industry: string;
+  personas: string[];
+  roles: string[];
+  modules: string[];
+  screens: string[];
+  userJourney: string[];
+  navigationFlow: Array<{ from: string; to: string; label: string }>;
+}
+
+export interface DesignReviewIssue {
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  category: 'accessibility' | 'ux' | 'ui' | 'consistency' | 'responsive';
+  screen: string;
+  message: string;
+  elementId?: string;
 }
 
 export interface DesignAgentRun {
@@ -383,7 +495,7 @@ export interface Profile {
 }
 
 export type QaSourceType =
-  | 'apk' | 'ipa' | 'flutter' | 'react_native' | 'hybrid' | 'web_app'
+  | 'apk' | 'aab' | 'ipa' | 'flutter' | 'react_native' | 'hybrid' | 'web_app'
   | 'play_store_url' | 'app_store_url' | 'web_url';
 
 export type QaPlatform = 'android' | 'ios' | 'web' | 'cross_platform';
@@ -395,11 +507,21 @@ export interface QaProject {
   sourceType: QaSourceType;
   sourceRef: string;
   platform: QaPlatform;
+  /** Real metadata extracted from an uploaded APK/AAB/IPA binary — null when not a binary upload or parsing failed. */
+  appPackageName: string | null;
+  appDisplayName: string | null;
+  appVersionName: string | null;
+  appVersionCode: string | null;
+  appIconDataUrl: string | null;
+  sourceFileName: string | null;
+  fileSizeBytes: number | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export type QaRunStatus = 'queued' | 'running' | 'passed' | 'failed' | 'partial' | 'cancelled';
+
+export type QaRunSourceMode = 'catalog' | 'uploaded';
 
 export interface QaTestRun {
   id: string;
@@ -408,6 +530,8 @@ export interface QaTestRun {
   modules: string[];
   status: QaRunStatus;
   progress: number;
+  sourceMode: QaRunSourceMode;
+  engineMode: 'real_browser' | 'simulated';
   runNumber: number;
   runName: string;
   buildVersion: string;
@@ -424,6 +548,9 @@ export interface QaTestRun {
   totalCases: number;
   passedCases: number;
   failedCases: number;
+  blockedCases: number;
+  skippedCases: number;
+  etaSeconds: number | null;
   performanceScore: number | null;
   errorMessage: string | null;
   createdAt: string;
@@ -481,6 +608,30 @@ export interface QaTestCaseResult {
   screen: string;
   result: 'pass' | 'fail';
   failedStepNumber: number | null;
+  bugId: string | null;
+  createdAt: string;
+}
+
+export type QaUploadedResult = 'pending' | 'pass' | 'fail' | 'blocked' | 'skipped';
+
+export interface QaUploadedTestCase {
+  id: string;
+  runId: string;
+  order: number;
+  testCaseId: string;
+  module: string;
+  feature: string;
+  scenario: string;
+  preconditions: string;
+  steps: string[];
+  testData: string;
+  expectedResult: string;
+  priority: string;
+  severity: string;
+  result: QaUploadedResult;
+  actualResult: string;
+  failedStepIndex: number | null;
+  screenName: string;
   bugId: string | null;
   createdAt: string;
 }

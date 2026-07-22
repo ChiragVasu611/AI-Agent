@@ -45,6 +45,7 @@
     "@types/node": "20.6.2",
     "@types/react": "18.2.22",
     "@types/react-dom": "18.2.7",
+    "app-info-parser": "^1.1.6",
     "autoprefixer": "10.4.15",
     "bcryptjs": "^2.4.3",
     "class-variance-authority": "^0.7.0",
@@ -55,17 +56,20 @@
     "eslint": "8.49.0",
     "eslint-config-next": "13.5.1",
     "framer-motion": "^12.42.2",
+    "imapflow": "^1.4.7",
     "input-otp": "^1.2.4",
     "jose": "^5.9.6",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
     "lucide-react": "^0.446.0",
+    "mailparser": "^3.9.14",
     "mammoth": "^1.12.0",
     "mongodb": "^6.10.0",
     "mongoose": "^8.8.0",
     "next": "13.5.1",
     "next-themes": "^0.3.0",
     "pdf-parse": "^2.4.5",
+    "playwright": "^1.61.1",
     "postcss": "8.4.30",
     "react": "18.2.0",
     "react-day-picker": "^8.10.1",
@@ -82,5 +86,8 @@
     "xlsx": "^0.18.5",
     "zod": "^3.23.8",
     "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.6"
   }
 }
