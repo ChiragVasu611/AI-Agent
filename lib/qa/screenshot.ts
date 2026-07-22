@@ -1,8 +1,17 @@
 const PALETTE = ['#4F46E5', '#0EA5E9', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
 
-/** Deterministic placeholder "screenshot" — there is no real device to capture from (see Devices page). */
-export function placeholderScreenshot(screenName: string, module: string): string {
+/**
+ * Deterministic placeholder "screenshot" — there is no real device to capture
+ * from (see Devices page). Must incorporate the execution's own identity
+ * (runId + app name), not just the screen name, so two different executions
+ * that happen to visit a screen with the same name (e.g. "Login") never
+ * render a byte-for-byte identical image — that previously looked like a
+ * cached/leaked screenshot from an unrelated run even though the underlying
+ * DB record was correctly scoped to the right runId.
+ */
+export function placeholderScreenshot(screenName: string, module: string, runId: string, appName: string): string {
   const color = PALETTE[Math.abs(hashCode(screenName)) % PALETTE.length];
+  const shortRunId = runId.slice(-8);
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="375" height="667" viewBox="0 0 375 667">
     <rect width="375" height="667" fill="#111214"/>
     <rect x="0" y="0" width="375" height="64" fill="${color}"/>
@@ -10,6 +19,7 @@ export function placeholderScreenshot(screenName: string, module: string): strin
     <rect x="24" y="96" width="327" height="120" rx="12" fill="#1B1C1F"/>
     <rect x="24" y="232" width="327" height="80" rx="12" fill="#1B1C1F"/>
     <rect x="24" y="328" width="327" height="80" rx="12" fill="#1B1C1F"/>
+    <text x="24" y="590" font-family="sans-serif" font-size="11" fill="#6B7280">${escapeXml(appName)} · Run ${escapeXml(shortRunId)}</text>
     <text x="24" y="620" font-family="sans-serif" font-size="12" fill="#8A8F98">Simulated capture · ${escapeXml(module)}</text>
   </svg>`;
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;

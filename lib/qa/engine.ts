@@ -2,7 +2,6 @@ import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { QaBug } from '@/lib/mongodb/models/QaBug';
-import { QaLogEntry } from '@/lib/mongodb/models/QaLogEntry';
 import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
 import { QaTestCaseResult } from '@/lib/mongodb/models/QaTestCaseResult';
 import { QA_MODULE_BY_KEY, randomScreen } from '@/lib/qa/modules';
@@ -10,18 +9,11 @@ import { generateQaAnalysis, parseJsonLoose } from '@/lib/qa/ai-provider';
 import { fallbackBug } from '@/lib/qa/bug-bank';
 import { placeholderScreenshot } from '@/lib/qa/screenshot';
 import { SIMULATED_DEVICE_NAMES } from '@/lib/qa/device-adapter';
+import { sleep, log } from '@/lib/qa/runtime-helpers';
 import type { QaBugType, QaSeverity } from '@/lib/types';
 
 const CASES_PER_MODULE = 3;
 const STEP_DELAY_MS = 550;
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function log(runId: string, source: 'automation' | 'logcat' | 'api' | 'error' | 'crash', level: 'debug' | 'info' | 'warn' | 'error', message: string) {
-  await QaLogEntry.create({ runId, source, level, message });
-}
 
 /** "Pixel 7 (Emulator, Android 14)" -> "Android 14"; "Chrome 124 (Web, Desktop)" -> "Desktop". */
 function parseOsVersion(device: string): string {
@@ -135,7 +127,7 @@ export async function runQaTestExecution(runId: string, apiKey: string | null) {
       await run.save();
       await log(runId, 'automation', 'info', `[${moduleLabel}] Running "${c.name}" on screen "${c.screen}"...`);
       await QaScreenshot.create({
-        runId, screenName: c.screen, testStep: c.name, imageDataUrl: placeholderScreenshot(c.screen, moduleLabel),
+        runId, screenName: c.screen, testStep: c.name, imageDataUrl: placeholderScreenshot(c.screen, moduleLabel, runId, (project as any).name),
       });
       await sleep(STEP_DELAY_MS);
 
@@ -197,7 +189,7 @@ export async function runQaTestExecution(runId: string, apiKey: string | null) {
         stepsToReproduce: [`Open ${(project as any).name}`, `Navigate to ${b.screenName}`, `Perform the ${moduleLabel.toLowerCase()} scenario`],
         expectedResult: b.expectedResult,
         actualResult: b.actualResult,
-        screenshotDataUrl: placeholderScreenshot(b.screenName, moduleLabel),
+        screenshotDataUrl: placeholderScreenshot(b.screenName, moduleLabel, runId, (project as any).name),
         logs: `[${moduleLabel}] Failure captured on ${device} during automated execution.`,
         stackTrace: (b as any).stackTrace ?? (b.type === 'crash' || b.type === 'anr' ? 'Stack trace unavailable in simulated run.' : null),
         apiRequest: isApiBug ? `GET /api/${moduleKey}\nHost: ${(project as any).sourceRef}` : null,

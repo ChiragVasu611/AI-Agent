@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Search, FileDown, FileSpreadsheet, FileText, GitCompare, ChevronDown,
   Bug as BugIcon, CheckCircle2, XCircle, Clock, X,
@@ -105,29 +105,54 @@ export default function ExecutionReportsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, statusFilter, deviceFilter, executedByFilter, dateFrom, dateTo, sort]);
 
+  // Refs mirror the latest selection so async .then() callbacks can check
+  // "is my request still the current one" — a value closed over at effect-start
+  // never changes, so comparing against the closed-over state is a no-op; only
+  // a ref mutated on every render reflects a newer selection made mid-flight.
+  const selectedRunIdRef = useRef(selectedRunId);
+  useEffect(() => { selectedRunIdRef.current = selectedRunId; }, [selectedRunId]);
+  const compareIdsRef = useRef(compareIds);
+  useEffect(() => { compareIdsRef.current = compareIds; }, [compareIds]);
+
   useEffect(() => {
-    if (!selectedRunId) return;
+    // Clear immediately on switch, and fence every response against the run it
+    // was requested for — otherwise a slow response for a previously-selected
+    // run can resolve after a newer selection and overwrite it with stale data.
     setRunDetail(null);
     setTestCases([]);
-    fetch(`/api/qa/runs/compare?a=${selectedRunId}&b=${selectedRunId}`)
+    if (!selectedRunId) return;
+    const requestedFor = selectedRunId;
+
+    fetch(`/api/qa/runs/compare?a=${requestedFor}&b=${requestedFor}`)
       .then((r) => r.json())
-      .then((data) => setRunDetail(data.a));
-    fetch(`/api/qa/test-cases?runId=${selectedRunId}`)
+      .then((data) => { if (requestedFor === selectedRunIdRef.current) setRunDetail(data.a); });
+    fetch(`/api/qa/test-cases?runId=${requestedFor}`)
       .then((r) => r.json())
-      .then((data) => setTestCases(data.testCases ?? []));
+      .then((data) => { if (requestedFor === selectedRunIdRef.current) setTestCases(data.testCases ?? []); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRunId]);
 
   useEffect(() => {
     if (compareIds.length !== 2) { setCompareData(null); return; }
+    const requestedFor = [...compareIds];
     fetch(`/api/qa/runs/compare?a=${compareIds[0]}&b=${compareIds[1]}`)
       .then((r) => r.json())
-      .then(setCompareData);
+      .then((data) => {
+        const cur = compareIdsRef.current;
+        if (requestedFor[0] === cur[0] && requestedFor[1] === cur[1]) setCompareData(data);
+      });
   }, [compareIds]);
 
   const [runBugs, setRunBugs] = useState<any[]>([]);
   useEffect(() => {
-    if (!selectedRunId) { setRunBugs([]); return; }
-    fetch(`/api/qa/bugs?runId=${selectedRunId}`).then((r) => r.json()).then((d) => setRunBugs(d.bugs ?? [])).catch(() => setRunBugs([]));
+    setRunBugs([]);
+    if (!selectedRunId) return;
+    const requestedFor = selectedRunId;
+    fetch(`/api/qa/bugs?runId=${requestedFor}`)
+      .then((r) => r.json())
+      .then((d) => { if (requestedFor === selectedRunIdRef.current) setRunBugs(d.bugs ?? []); })
+      .catch(() => { if (requestedFor === selectedRunIdRef.current) setRunBugs([]); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRunId]);
 
   const filteredBugs = useMemo(() => {

@@ -8,10 +8,28 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import type { Candidate } from '@/lib/types';
+import type { ApplicationSource, ApplicationStage, Candidate } from '@/lib/types';
+
+interface LatestApplication {
+  jobTitle: string | null;
+  matchScore: { overall: number } | null;
+  stage: ApplicationStage;
+  source: ApplicationSource;
+  appliedAt: string;
+}
+
+type CandidateWithApplication = Candidate & { latestApplication: LatestApplication | null };
+
+const SOURCE_LABEL: Record<ApplicationSource, string> = {
+  career_portal: 'Career Portal',
+  linkedin: 'LinkedIn',
+  email: 'Email',
+  whatsapp: 'WhatsApp',
+  manual: 'Manual',
+};
 
 export default function CandidatesPage() {
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [candidates, setCandidates] = useState<CandidateWithApplication[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [minExperience, setMinExperience] = useState('');
@@ -78,6 +96,19 @@ export default function CandidatesPage() {
                   {c.skills.slice(0, 4).map((s) => <Badge key={s} variant="outline" className="text-[10px] font-normal">{s}</Badge>)}
                 </div>
                 <div className="mt-3 text-xs text-muted-foreground">{c.totalExperienceYears} years experience</div>
+                {c.latestApplication && (
+                  <div className="mt-3 space-y-1.5 border-t border-border pt-3 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate text-muted-foreground">{c.latestApplication.jobTitle ?? 'Unassigned'}</span>
+                      {c.latestApplication.matchScore && <Badge variant="outline" className="text-[10px]">{Math.round(c.latestApplication.matchScore.overall)}% match</Badge>}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge className="text-[10px] capitalize">{c.latestApplication.stage.replace('_', ' ')}</Badge>
+                      <Badge variant="secondary" className="text-[10px]">{SOURCE_LABEL[c.latestApplication.source]}</Badge>
+                      <span className="text-muted-foreground">{new Date(c.latestApplication.appliedAt).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                )}
               </Card>
             </Link>
           ))}
