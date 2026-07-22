@@ -5,14 +5,17 @@ import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
   Accessibility, CheckCircle2, Clock, FileOutput, Layers, LayoutTemplate, Loader2,
-  Palette, PenTool, ScanSearch, Sparkles, Tablet, Workflow, XCircle,
+  Palette, PenTool, ScanSearch, Sparkles, Tablet, Wand2, Workflow, XCircle,
   type LucideIcon,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { DESIGN_AGENTS, type DesignAgentId } from '@/lib/ai/design-agents';
-import type { DesignAgentRun } from '@/lib/types';
+import { improveDesign } from '@/app/designer/actions';
+import type { DesignAgentRun, DesignReviewIssue } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 
 const ICONS: Record<DesignAgentId, LucideIcon> = {
   research: ScanSearch,
@@ -140,11 +143,17 @@ export function DesignAgentPipeline({ projectId, active }: { projectId: string |
   );
 }
 
+interface RightPanelProject {
+  status: string; progress: number; score: number | null;
+  uxScore: number | null; uiScore: number | null; accessibilityScore: number | null;
+  consistencyScore: number | null; responsiveScore: number | null;
+  reviewIssues: DesignReviewIssue[]; aiEnhanced: boolean;
+  summary: string | null; createdAt: string;
+}
+
 export function DesignRightPanel({ projectId }: { projectId: string | null }) {
-  const [project, setProject] = useState<{
-    status: string; progress: number; score: number | null;
-    summary: string | null; createdAt: string;
-  } | null>(null);
+  const [project, setProject] = useState<RightPanelProject | null>(null);
+  const [improving, setImproving] = useState(false);
 
   useEffect(() => {
     if (!projectId) {
@@ -156,7 +165,7 @@ export function DesignRightPanel({ projectId }: { projectId: string | null }) {
     async function load() {
       const res = await fetch(`/api/design-projects/${projectId}`);
       const data = await res.json();
-      if (!cancelled) setProject(data.project as typeof project);
+      if (!cancelled) setProject(data.project as RightPanelProject);
     }
     load();
     const interval = setInterval(load, 3000);
@@ -168,6 +177,18 @@ export function DesignRightPanel({ projectId }: { projectId: string | null }) {
   }, [projectId]);
 
   const ready = project?.status === 'completed';
+
+  async function onImprove() {
+    if (!projectId) return;
+    setImproving(true);
+    const res = await improveDesign(projectId);
+    setImproving(false);
+    if ((res as any)?.error) return toast.error((res as any).error);
+    if (res.fixedCount === 0) return toast.info(res.message ?? 'No automatically-fixable issues were found.');
+    toast.success(`Applied ${res.fixedCount} automatic fix(es).`);
+    const refreshed = await fetch(`/api/design-projects/${projectId}`).then((r) => r.json());
+    setProject(refreshed.project as RightPanelProject);
+  }
 
   return (
     <div className="space-y-4">
@@ -190,15 +211,51 @@ export function DesignRightPanel({ projectId }: { projectId: string | null }) {
         </div>
       </div>
 
-      <div className="rounded-2xl border border-border bg-card/60 p-5">
-        <div className="flex items-center justify-between">
-          <span className="font-display text-sm font-semibold">Accessibility Score</span>
-          <Accessibility className="h-4 w-4 text-muted-foreground" />
+      {ready && (
+        <div className="rounded-2xl border border-border bg-card/60 p-5">
+          <div className="flex items-center justify-between">
+            <span className="font-display text-sm font-semibold">AI Design Review</span>
+            <Badge variant="outline" className="text-[10px]">{project?.aiEnhanced ? 'AI-enhanced' : 'Deterministic engine'}</Badge>
+          </div>
+          <div className="mt-2 font-display text-3xl font-semibold">
+            {project?.score != null ? `${project.score}/100` : '—'}
+            <span className="ml-1.5 text-xs font-normal text-muted-foreground">overall</span>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+            <ScoreRow label="UX" value={project?.uxScore} />
+            <ScoreRow label="UI" value={project?.uiScore} />
+            <ScoreRow label="Accessibility" value={project?.accessibilityScore} />
+            <ScoreRow label="Consistency" value={project?.consistencyScore} />
+            <ScoreRow label="Responsive" value={project?.responsiveScore} />
+          </div>
+
+          {project && project.reviewIssues.length > 0 && (
+            <div className="mt-3 max-h-40 space-y-1.5 overflow-y-auto border-t border-border pt-3">
+              {project.reviewIssues.slice(0, 8).map((issue, i) => (
+                <div key={i} className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <Badge variant="outline" className="mt-0.5 shrink-0 text-[9px] capitalize">{issue.severity}</Badge>
+                  <span>{issue.message}</span>
+                </div>
+              ))}
+              {project.reviewIssues.length > 8 && (
+                <p className="text-[11px] text-muted-foreground">+{project.reviewIssues.length - 8} more</p>
+              )}
+            </div>
+          )}
+
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={improving}
+            onClick={onImprove}
+            className="mt-3 w-full gap-2"
+          >
+            {improving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+            Improve Design
+          </Button>
         </div>
-        <div className="mt-2 font-display text-3xl font-semibold">
-          {project?.score != null ? `${project.score}/100` : '—'}
-        </div>
-      </div>
+      )}
 
       {project?.summary && (
         <div className="rounded-2xl border border-border bg-card/60 p-5 text-sm text-muted-foreground">
@@ -227,6 +284,15 @@ export function DesignRightPanel({ projectId }: { projectId: string | null }) {
           <ViewButton label="Handoff" icon={FileOutput} projectId={projectId} tab="handoff" />
         </div>
       </div>
+    </div>
+  );
+}
+
+function ScoreRow({ label, value }: { label: string; value: number | null | undefined }) {
+  return (
+    <div className="flex items-center justify-between rounded-lg bg-secondary/30 px-2.5 py-1.5">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium">{value != null ? value : '—'}</span>
     </div>
   );
 }

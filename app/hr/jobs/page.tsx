@@ -7,7 +7,6 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { CreateJobDialog } from '@/components/modules/hr/create-job-dialog';
 import type { Job } from '@/lib/types';
 
 const PRIORITY_COLOR: Record<string, string> = {
@@ -21,7 +20,6 @@ export default function JobsPage() {
   const [jobs, setJobs] = useState<(Job & { applicantCount: number })[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,16 +30,13 @@ export default function JobsPage() {
       .then((data) => { if (!cancelled) setJobs(data.jobs ?? []); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [search, refreshKey]);
+  }, [search]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6 lg:p-8">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Jobs</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Manage open positions and their hiring pipelines.</p>
-        </div>
-        <CreateJobDialog onCreated={() => setRefreshKey((k) => k + 1)} />
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight">Jobs</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Manage open positions and their hiring pipelines.</p>
       </div>
 
       <div className="relative max-w-sm">
@@ -56,7 +51,7 @@ export default function JobsPage() {
       ) : jobs.length === 0 ? (
         <Card className="flex flex-col items-center justify-center gap-2 border-dashed border-border bg-card/40 px-6 py-16 text-center backdrop-blur">
           <Briefcase className="h-8 w-8 text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">No jobs yet. Create your first job posting to start hiring.</p>
+          <p className="text-sm text-muted-foreground">No jobs yet.</p>
         </Card>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

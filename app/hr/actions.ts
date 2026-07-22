@@ -17,61 +17,8 @@ import { generateOfferLetter } from '@/lib/hr/offer-letter';
 import { handleChatbotMessage } from '@/lib/hr/chatbot';
 import { hasPermission } from '@/lib/auth/permissions';
 import type {
-  ApplicationStage, EmploymentType, InterviewRatings, InterviewStage, JobPriority, WorkMode,
+  ApplicationStage, InterviewRatings, InterviewStage,
 } from '@/lib/types';
-
-
-function splitList(value: FormDataEntryValue | null): string[] {
-  return String(value ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-export async function createJob(formData: FormData) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
-  if (!hasPermission(user.permissions, 'recruitment.manage')) return { error: 'Forbidden: your role does not have recruitment.manage permission.' };
-
-  const title = String(formData.get('title') ?? '').trim();
-  const department = String(formData.get('department') ?? '').trim();
-  const hiringManager = String(formData.get('hiringManager') ?? '').trim();
-  if (!title || !department || !hiringManager) return { error: 'Job title, department, and hiring manager are required.' };
-
-  await connectToDatabase();
-
-  const job = await Job.create({
-    userId: user.id,
-    title,
-    department,
-    employmentType: (String(formData.get('employmentType') ?? 'full_time')) as EmploymentType,
-    workMode: (String(formData.get('workMode') ?? 'onsite')) as WorkMode,
-    experienceMinYears: Number(formData.get('experienceMinYears') ?? 0),
-    experienceMaxYears: Number(formData.get('experienceMaxYears') ?? 0),
-    salaryMin: formData.get('salaryMin') ? Number(formData.get('salaryMin')) : null,
-    salaryMax: formData.get('salaryMax') ? Number(formData.get('salaryMax')) : null,
-    salaryCurrency: String(formData.get('salaryCurrency') ?? 'USD'),
-    requiredSkills: splitList(formData.get('requiredSkills')),
-    preferredSkills: splitList(formData.get('preferredSkills')),
-    description: String(formData.get('description') ?? ''),
-    responsibilities: String(formData.get('responsibilities') ?? ''),
-    qualifications: String(formData.get('qualifications') ?? ''),
-    benefits: String(formData.get('benefits') ?? ''),
-    hiringManager,
-    openings: Number(formData.get('openings') ?? 1),
-    priority: (String(formData.get('priority') ?? 'medium')) as JobPriority,
-    closingDate: formData.get('closingDate') ? new Date(String(formData.get('closingDate'))) : null,
-    status: 'open',
-  });
-
-  await ActivityLog.create({
-    userId: user.id, action: 'hr.job.create', entity: 'job', entityId: String(job._id), meta: { title },
-  });
-
-  revalidatePath('/hr');
-  revalidatePath('/hr/jobs');
-  return { jobId: String(job._id) };
-}
 
 export async function updateJobStatus(jobId: string, status: 'open' | 'closed' | 'draft') {
   const user = await getCurrentUser();

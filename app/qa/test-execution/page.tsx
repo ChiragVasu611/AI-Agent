@@ -3,7 +3,7 @@
 import { useEffect, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Loader2, Play } from 'lucide-react';
+import { Loader2, Play, UploadCloud } from 'lucide-react';
 import { toast } from 'sonner';
 import { startTestExecution } from '@/app/qa/actions';
 import { QA_MODULES, DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
@@ -18,8 +18,9 @@ import {
 } from '@/components/ui/select';
 
 const SOURCE_TYPES = [
-  { value: 'apk', label: 'Android APK' },
-  { value: 'ipa', label: 'iOS IPA' },
+  { value: 'apk', label: 'Android APK (.apk)' },
+  { value: 'aab', label: 'Android App Bundle (.aab)' },
+  { value: 'ipa', label: 'iOS IPA (.ipa)' },
   { value: 'flutter', label: 'Flutter App' },
   { value: 'react_native', label: 'React Native App' },
   { value: 'hybrid', label: 'Hybrid App' },
@@ -29,12 +30,16 @@ const SOURCE_TYPES = [
   { value: 'web_url', label: 'Web URL' },
 ];
 
+const BINARY_EXTENSIONS: Record<string, string> = { apk: '.apk', aab: '.aab', ipa: '.ipa' };
+
 export default function TestExecutionPage() {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [sourceType, setSourceType] = useState('web_url');
   const [selectedModules, setSelectedModules] = useState<string[]>(DEFAULT_SMOKE_MODULES);
   const [runs, setRuns] = useState<any[]>([]);
+  const [appFileName, setAppFileName] = useState('');
+  const isBinarySource = sourceType in BINARY_EXTENSIONS;
 
   useEffect(() => {
     let cancelled = false;
@@ -59,7 +64,12 @@ export default function TestExecutionPage() {
     selectedModules.forEach((m) => formData.append('modules', m));
 
     startTransition(async () => {
-      const res = await startTestExecution(formData);
+      // Binary APK/AAB/IPA uploads go through a Route Handler instead of this
+      // server action, since server actions in this Next.js version cap request
+      // bodies at 1MB — far too small for a real app binary.
+      const res = isBinarySource
+        ? await fetch('/api/qa/runs/start-binary', { method: 'POST', body: formData }).then((r) => r.json())
+        : await startTestExecution(formData);
       if (res?.error) {
         toast.error(res.error);
         return;
@@ -83,7 +93,7 @@ export default function TestExecutionPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label>Source Type</Label>
-              <Select value={sourceType} onValueChange={setSourceType}>
+              <Select value={sourceType} onValueChange={(v) => { setSourceType(v); setAppFileName(''); }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {SOURCE_TYPES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
@@ -101,15 +111,44 @@ export default function TestExecutionPage() {
             <Input id="buildVersion" name="buildVersion" placeholder="1.0.0" defaultValue="1.0.0" />
           </div>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="sourceRef">File name or URL *</Label>
-            <Input
-              id="sourceRef"
-              name="sourceRef"
-              required
-              placeholder="app-release.apk, https://play.google.com/store/apps/details?id=..., or https://example.com"
-            />
-          </div>
+          {isBinarySource ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="appFile">Upload {BINARY_EXTENSIONS[sourceType]} file *</Label>
+              <label
+                htmlFor="appFile"
+                className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-border px-4 py-6 text-sm text-muted-foreground transition hover:bg-secondary/40"
+              >
+                <UploadCloud className="h-5 w-5 flex-shrink-0" />
+                {appFileName ? (
+                  <span className="text-foreground">{appFileName}</span>
+                ) : (
+                  <span>Click to upload your {BINARY_EXTENSIONS[sourceType]} file, or drag it here.</span>
+                )}
+                <input
+                  id="appFile"
+                  name="appFile"
+                  type="file"
+                  accept={BINARY_EXTENSIONS[sourceType]}
+                  required
+                  className="hidden"
+                  onChange={(e) => setAppFileName(e.target.files?.[0]?.name ?? '')}
+                />
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Real package/bundle ID, display name, and version are extracted automatically from the uploaded binary.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <Label htmlFor="sourceRef">File name or URL *</Label>
+              <Input
+                id="sourceRef"
+                name="sourceRef"
+                required
+                placeholder="app-release.apk, https://play.google.com/store/apps/details?id=..., or https://example.com"
+              />
+            </div>
+          )}
 
           <div className="space-y-2">
             <Label>Testing Modules</Label>

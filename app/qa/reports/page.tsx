@@ -34,7 +34,7 @@ export default function QaReportsPage() {
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6 lg:p-8">
       <div>
-        <h1 className="font-display text-2xl font-semibold tracking-tight">Reports & Analytics</h1>
+        <h1 className="font-display text-2xl font-semibold tracking-tight">Analytics</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Trends across every test run. PDF/Excel/CSV export and the five formal report types (Executive, QA,
           Developer, Security, Performance) are planned for a later phase — this view already reflects real data.

@@ -11,46 +11,6 @@ function json(content: string) {
   return `Respond ONLY with valid minified JSON, no prose, no code fences. ${content}`;
 }
 
-// Shared rules for emitting a full, directly-compilable Flutter project as a
-// set of delimited file blocks (far more robust than JSON for source code).
-const FILE_PROTOCOL = `Output format — emit one or more file blocks and NOTHING else (no prose, no markdown fences):
-=== FILE: lib/main.dart ===
-<verbatim file contents>
-=== END ===
-=== FILE: lib/screens/home_screen.dart ===
-<verbatim file contents>
-=== END ===
-
-Hard rules:
-- Entry point MUST be lib/main.dart with a top-level void main().
-- Only write files under lib/. Do NOT emit pubspec.yaml, android/, ios/, web/ or any file outside lib/.
-- Use ONLY the Flutter SDK and Material (package:flutter/material.dart). NO third-party packages, NO assets, NO network/image URLs, NO plugins.
-- Null-safe Dart 3, Material 3. Code MUST compile with a clean 'flutter analyze' (no undefined names, no missing imports, every referenced widget/class defined).
-- Every path in an "import '...';" that points into lib/ must correspond to a file you also emit.`;
-
-const CODER_SYSTEM = `You are the Code Generator Agent. You author a COMPLETE, real, multi-screen Flutter application in Dart that recreates the given reference app. Produce at least 4 distinct screens with working navigation (e.g. a bottom NavigationBar plus pushed detail routes), realistic in-app content/data, a coherent theme, and clean widget composition split across multiple files under lib/.
-
-${FILE_PROTOCOL}`;
-
-export function fixerSystemPrompt(): string {
-  return `You are the Build Fixer Agent. You are given the current Flutter source files and the exact errors from 'flutter analyze' or 'flutter build'. Return the corrected project so it compiles cleanly.
-
-${FILE_PROTOCOL}
-
-Additional rules:
-- Re-emit EVERY file the app needs (full contents), not just the changed ones — the previous files are replaced wholesale by what you output.
-- Fix the reported errors directly: define missing names, add missing imports, correct types, remove any third-party package usage.`;
-}
-
-export function fixerUserPrompt(errors: string, files: { path: string; content: string }[]): string {
-  const bundle = files
-    .map((f) => `=== FILE: ${f.path} ===\n${f.content}\n=== END ===`)
-    .join('\n')
-    .slice(0, 24000);
-  const errText = errors.slice(-6000);
-  return `The build failed with these errors:\n\n${errText}\n\nHere are the current files:\n\n${bundle}\n\nReturn the full corrected fileset.`;
-}
-
 export function systemPrompt(agent: AgentId): string {
   switch (agent) {
     case 'analyzer':
@@ -60,7 +20,7 @@ export function systemPrompt(agent: AgentId): string {
     case 'designer':
       return 'You are the UI Designer Agent. Given the planning JSON, you produce Figma-style wireframe JSON: screens, components, responsive layouts, color palette, typography, icons, spacing. Always respond as JSON.';
     case 'coder':
-      return CODER_SYSTEM;
+      return 'You are the Code Generator Agent. Given the design JSON, you generate complete application source code for the requested platform including authentication, screens, components, navigation, API integration, database integration, business logic and state management. Respond as JSON with a files[] array of {path, content}.';
     case 'builder':
       return 'You are the Build Agent. You compile the generated project into APK/AAB/IPA. Respond as JSON with build metadata: version, build_time_ms, logs, artifact_urls.';
     case 'emulator':
@@ -82,7 +42,7 @@ export function userPrompt(agent: AgentId, input: PromptInput): string {
     case 'designer':
       return json(`Generate UI design JSON for ${input.platform}.${prev}`);
     case 'coder':
-      return `Write the complete Flutter source for an app inspired by ${input.referenceUrl} (from ${input.store}). Target platform: ${input.platform}. Recreate its real screens, navigation and content. Output only the FILE blocks described in your instructions.${prev}`;
+      return json(`Generate full source code for ${input.platform}.${prev}`);
     case 'builder':
       return json(`Compile the project for ${input.platform}. Produce build metadata.${prev}`);
     case 'emulator':

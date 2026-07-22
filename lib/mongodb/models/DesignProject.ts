@@ -20,6 +20,17 @@ const designProjectSchema = new Schema({
   prototypeUrl: { type: String, default: null },
   handoffUrl: { type: String, default: null },
   summary: { type: String, default: null },
+
+  /** Deterministic requirement-analysis + screen-discovery plan, built before any AI call. */
+  plan: { type: Schema.Types.Mixed, default: null },
+  /** Whether any pipeline stage actually used a live AI call vs. the deterministic fallback. */
+  aiEnhanced: { type: Boolean, default: false },
+  uxScore: { type: Number, default: null },
+  uiScore: { type: Number, default: null },
+  accessibilityScore: { type: Number, default: null },
+  consistencyScore: { type: Number, default: null },
+  responsiveScore: { type: Number, default: null },
+  reviewIssues: { type: Schema.Types.Mixed, default: [] },
 }, { timestamps: true });
 
 export const DesignProject = models.DesignProject ?? model('DesignProject', designProjectSchema);

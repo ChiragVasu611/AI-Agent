@@ -19,7 +19,7 @@ export interface AIResponse {
 
 export interface AIProvider {
   name: string;
-  generate(req: AIRequest, model: AIModel): Promise<AIResponse>;
+  generate(req: AIRequest, model: AIModel, overrideApiKey?: string | null): Promise<AIResponse>;
 }
 
 /**
@@ -56,12 +56,12 @@ export class OpenRouterProvider implements AIProvider {
     return this.fallbackKey;
   }
 
-  async generate(req: AIRequest, model: AIModel): Promise<AIResponse> {
-    const apiKey = this.keyFor(model);
+  async generate(req: AIRequest, model: AIModel, overrideApiKey?: string | null): Promise<AIResponse> {
+    const apiKey = overrideApiKey || this.keyFor(model);
 
     if (!apiKey) {
       throw new Error(
-        `No OpenRouter API key configured for model "${model}". Set OPENROUTER_API_KEY_ULTRA / OPENROUTER_API_KEY_SUPER or OPENROUTER_API_KEY.`,
+        `No OpenRouter API key configured for model "${model}". Set OPENROUTER_API_KEY_ULTRA / OPENROUTER_API_KEY_SUPER or OPENROUTER_API_KEY, or add your own key in Settings.`,
       );
     }
 

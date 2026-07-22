@@ -30,12 +30,16 @@ export async function GET() {
   });
   const bugTrends = Array.from(bugTrendMap.entries()).map(([date, count]) => ({ date, count }));
 
-  const execTimeTrends = runs
-    .filter((r: any) => r.startedAt && r.completedAt)
-    .map((r: any) => ({
-      date: dayKey(new Date(r.completedAt)),
-      seconds: Math.round((new Date(r.completedAt).getTime() - new Date(r.startedAt).getTime()) / 1000),
-    }));
+  const execTimeTotals = new Map<string, { seconds: number; count: number }>();
+  runs.filter((r: any) => r.startedAt && r.completedAt).forEach((r: any) => {
+    const key = dayKey(new Date(r.completedAt));
+    const seconds = Math.round((new Date(r.completedAt).getTime() - new Date(r.startedAt).getTime()) / 1000);
+    const existing = execTimeTotals.get(key) ?? { seconds: 0, count: 0 };
+    execTimeTotals.set(key, { seconds: existing.seconds + seconds, count: existing.count + 1 });
+  });
+  const execTimeTrends = Array.from(execTimeTotals.entries()).map(([date, { seconds, count }]) => ({
+    date, seconds: Math.round(seconds / count),
+  }));
 
   const crashTrendMap = new Map<string, number>();
   bugs.filter((b: any) => b.type === 'crash' || b.type === 'anr').forEach((b: any) => {

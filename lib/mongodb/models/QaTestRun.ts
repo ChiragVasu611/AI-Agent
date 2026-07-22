@@ -6,6 +6,8 @@ const qaTestRunSchema = new Schema({
   modules: { type: [String], default: [] },
   status: { type: String, enum: ['queued', 'running', 'passed', 'failed', 'partial', 'cancelled'], default: 'queued', index: true },
   progress: { type: Number, default: 0 },
+  sourceMode: { type: String, enum: ['catalog', 'uploaded'], default: 'catalog' },
+  engineMode: { type: String, enum: ['real_browser', 'simulated'], default: 'simulated' },
 
   runNumber: { type: Number, required: true, index: true },
   runName: { type: String, default: '' },
@@ -26,6 +28,9 @@ const qaTestRunSchema = new Schema({
   totalCases: { type: Number, default: 0 },
   passedCases: { type: Number, default: 0 },
   failedCases: { type: Number, default: 0 },
+  blockedCases: { type: Number, default: 0 },
+  skippedCases: { type: Number, default: 0 },
+  etaSeconds: { type: Number, default: null },
 
   performanceScore: { type: Number, default: null },
   errorMessage: { type: String, default: null },
