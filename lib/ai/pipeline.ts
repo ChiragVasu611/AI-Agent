@@ -17,7 +17,7 @@ import {
   type AppProfile,
 } from './factory';
 import { generateFlutterFiles } from './codegen';
-import { buildFlutterApk, installAndLaunch, GENERATED_PACKAGE, type BuildResult, type RunTarget } from '@/lib/build/toolchain';
+import { buildFlutterApk, buildFlutterWeb, installAndLaunch, listDevices, GENERATED_PACKAGE, type BuildResult, type WebBuildResult, type RunTarget } from '@/lib/build/toolchain';
 import type { Project as ProjectType } from '@/lib/types';
 
 function parseJSON(text: string): Record<string, unknown> | null {
@@ -71,6 +71,7 @@ interface AgentContext {
   profile: AppProfile;
   runTarget: RunTarget;
   build?: BuildResult;
+  web?: WebBuildResult;
   testCasesPassed?: number;
   testCasesTotal?: number;
 }
@@ -224,54 +225,87 @@ async function runAgent(
     case 'builder': {
       const build = await buildFlutterApk(ctx.projectId, files);
       ctx.build = build;
-      return {
-        output: builderOutput(ctx.profile, ctx.platform, files, {
-          buildTimeMs: build.buildTimeMs,
-          logs: build.logs,
-          apk: build.ok,
-        }),
+      // Also build the web bundle that powers the dashboard virtual emulator.
+      const web = await buildFlutterWeb(ctx.projectId, files);
+      ctx.web = web;
+      await Project.findByIdAndUpdate(ctx.projectId, { webReady: web.ok });
+      const out = builderOutput(ctx.profile, ctx.platform, files, {
+        buildTimeMs: build.buildTimeMs,
         logs: build.logs,
+        apk: build.ok,
+      });
+      return {
+        output: {
+          ...out,
+          webPreview: web.ok ? 'built' : 'unavailable',
+          webBuildTimeMs: web.buildTimeMs,
+        },
+        logs: build.logs + '\n\n[web]\n' + web.logs,
       };
     }
     case 'emulator': {
-      if (ctx.build?.ok && ctx.build.apkPath) {
-        const res = await installAndLaunch(ctx.build.apkPath, GENERATED_PACKAGE, { target: ctx.runTarget });
-        await Project.findByIdAndUpdate(ctx.projectId, { emulatorStatus: res.status, runSerial: res.serial });
-        const where = res.deviceType === 'physical' ? 'real device' : 'emulator';
+      const previewUrl = `/api/app-factory/preview/${ctx.projectId}/`;
+
+      // Virtual emulator = run the app live in the dashboard (Flutter web).
+      const runOnDashboard = async (reason: string) => {
+        const ok = !!ctx.web?.ok;
+        await Project.findByIdAndUpdate(ctx.projectId, { emulatorStatus: ok ? 'dashboard' : 'preview-failed', runSerial: null });
         return {
           output: {
-            status: res.status,
-            target: res.target,
-            deviceType: res.deviceType,
-            serial: res.serial,
-            booted: res.booted,
-            installed: res.installed,
-            launched: res.launched,
-            package: GENERATED_PACKAGE,
-            summary:
-              res.status === 'launched'
-                ? `Installed and launched on ${where} ${res.serial}.`
-                : res.status === 'installed'
-                ? `Installed on ${where} ${res.serial}; launch unconfirmed.`
-                : res.status === 'no-device'
-                ? ctx.runTarget === 'real-device'
-                  ? 'No physical device detected. Connect one over USB or Wi-Fi.'
-                  : 'No device or emulator available to run the APK.'
-                : res.status === 'unavailable'
-                ? 'Android SDK (adb) not found on this host.'
-                : 'Emulator run did not complete.',
+            mode: 'web-preview' as const,
+            status: ok ? 'running-dashboard' : 'preview-unavailable',
+            target: ctx.runTarget,
+            previewUrl: ok ? previewUrl : null,
+            summary: ok
+              ? `Running in the dashboard virtual emulator (Flutter web). ${reason}`
+              : 'The web preview build was unavailable, so the dashboard emulator could not start.',
           },
-          logs: res.logs,
+          logs: ctx.web?.logs ?? 'No web build.',
         };
-      }
-      await Project.findByIdAndUpdate(ctx.projectId, { emulatorStatus: 'skipped' });
-      return {
-        output: {
-          status: 'skipped',
-          summary: 'No APK was produced by the build step, so the emulator run was skipped.',
-        },
-        logs: 'Skipped — no APK artifact.',
       };
+
+      if (ctx.runTarget === 'emulator') {
+        return runOnDashboard('Selected target: virtual emulator.');
+      }
+
+      // real-device / auto → try a physical device.
+      if (ctx.build?.ok && ctx.build.apkPath) {
+        const devices = await listDevices();
+        const hasPhysical = devices.some((d) => d.type === 'physical');
+        if (ctx.runTarget === 'real-device' || hasPhysical) {
+          const res = await installAndLaunch(ctx.build.apkPath, GENERATED_PACKAGE, { target: 'real-device' });
+          await Project.findByIdAndUpdate(ctx.projectId, { emulatorStatus: res.status, runSerial: res.serial });
+          return {
+            output: {
+              mode: 'device' as const,
+              status: res.status,
+              target: res.target,
+              deviceType: res.deviceType,
+              serial: res.serial,
+              booted: res.booted,
+              installed: res.installed,
+              launched: res.launched,
+              package: GENERATED_PACKAGE,
+              summary:
+                res.status === 'launched'
+                  ? `Installed and launched on real device ${res.serial}.`
+                  : res.status === 'installed'
+                  ? `Installed on real device ${res.serial}; launch unconfirmed.`
+                  : res.status === 'no-device'
+                  ? 'No physical device detected. Connect one over USB or Wi-Fi, or use the virtual emulator.'
+                  : res.status === 'unavailable'
+                  ? 'Android SDK (adb) not found on this host.'
+                  : 'Device run did not complete.',
+            },
+            logs: res.logs,
+          };
+        }
+        // auto + no physical device → fall back to the dashboard virtual emulator.
+        return runOnDashboard('No physical device detected; using the dashboard emulator.');
+      }
+
+      // No APK — auto/real can still show the dashboard web preview.
+      return runOnDashboard('APK build unavailable; showing the web preview.');
     }
     case 'qa': {
       const cases = generateTestCases(ctx.profile);

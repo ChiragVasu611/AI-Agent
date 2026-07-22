@@ -109,62 +109,99 @@ export interface BuildResult {
   fileCount: number;
 }
 
+export interface WebBuildResult {
+  ok: boolean;
+  webDir: string | null;
+  logs: string;
+  buildTimeMs: number;
+}
+
+export function projectDirFor(projectId: string): string {
+  return path.join(buildsRoot(), projectId, 'app');
+}
+
+export function webDirFor(projectId: string): string {
+  return path.join(projectDirFor(projectId), 'build/web');
+}
+
+function baseHrefFor(projectId: string): string {
+  return `/api/app-factory/preview/${projectId}/`;
+}
+
+async function writeGeneratedFiles(projectDir: string, files: GeneratedFile[]): Promise<void> {
+  for (const f of files) {
+    const full = path.join(projectDir, f.path);
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    await fs.writeFile(full, f.content, 'utf8');
+  }
+}
+
 /**
- * Scaffolds a valid Flutter project (`flutter create`), overlays the generated
- * Dart, then builds a debug APK. Falls back to source-only when the toolchain
- * or the build is unavailable.
+ * Scaffolds the Flutter project once (`flutter create` with Android + Web,
+ * plus shared_preferences for persistence) and overlays the generated Dart.
+ * Idempotent — safe to call before both the APK and the Web build.
+ */
+async function ensureProject(projectId: string, files: GeneratedFile[], log: (s: string) => void): Promise<{ ok: boolean; projectDir: string }> {
+  const projectDir = projectDirFor(projectId);
+  await fs.mkdir(projectDir, { recursive: true });
+
+  if (!(await exists(path.join(projectDir, 'pubspec.yaml')))) {
+    log(`$ flutter create --org ${ORG} --project-name ${PROJECT_NAME} --platforms android,web .`);
+    const create = await run(flutterBin(), ['create', '--org', ORG, '--project-name', PROJECT_NAME, '--platforms', 'android,web', '.'], {
+      cwd: projectDir,
+      timeoutMs: 5 * 60000,
+    });
+    log(create.stdout.slice(-1500));
+    if (create.code !== 0) {
+      log('flutter create failed:\n' + create.stderr.slice(-2000));
+      return { ok: false, projectDir };
+    }
+    log('$ flutter pub add shared_preferences');
+    const add = await run(flutterBin(), ['pub', 'add', 'shared_preferences'], { cwd: projectDir, timeoutMs: 5 * 60000 });
+    log((add.stdout + add.stderr).slice(-1000));
+  }
+
+  // Overlay generated Dart (replaces the default counter app). Idempotent.
+  await run('rm', ['-rf', path.join(projectDir, 'lib')], {});
+  await writeGeneratedFiles(projectDir, files);
+  log(`Wrote ${files.length} generated files.`);
+  return { ok: true, projectDir };
+}
+
+async function zipSource(projectId: string, projectDir: string): Promise<string | null> {
+  const zipPath = path.join(buildsRoot(), projectId, 'source.zip');
+  const res = await run('zip', ['-r', '-q', zipPath, 'lib', 'test', 'README.md', 'pubspec.yaml'], {
+    cwd: projectDir,
+    timeoutMs: 60000,
+  });
+  return res.code === 0 ? zipPath : null;
+}
+
+/**
+ * Builds a debug APK. Falls back to source-only when the toolchain or the
+ * build is unavailable.
  */
 export async function buildFlutterApk(projectId: string, files: GeneratedFile[]): Promise<BuildResult> {
   const started = Date.now();
-  const projectDir = path.join(buildsRoot(), projectId, 'app');
+  const projectDir = projectDirFor(projectId);
   const logs: string[] = [];
   const log = (s: string) => logs.push(s);
-
-  async function writeSource() {
-    for (const f of files) {
-      const full = path.join(projectDir, f.path);
-      await fs.mkdir(path.dirname(full), { recursive: true });
-      await fs.writeFile(full, f.content, 'utf8');
-    }
-  }
-
-  async function zipSource(): Promise<string | null> {
-    const zipPath = path.join(buildsRoot(), projectId, 'source.zip');
-    const res = await run('zip', ['-r', '-q', zipPath, 'lib', 'README.md', 'pubspec.yaml'], {
-      cwd: projectDir,
-      timeoutMs: 60000,
-    });
-    return res.code === 0 ? zipPath : null;
-  }
 
   const status = await toolchainStatus();
   if (!status.flutter) {
     // No Flutter — still deliver the source so the project is downloadable.
-    await writeSource();
+    await writeGeneratedFiles(projectDir, files);
     log('Flutter toolchain not found — skipping compile, delivering source only.');
-    const sourceZipPath = await zipSource();
+    const sourceZipPath = await zipSource(projectId, projectDir);
     return { ok: false, apkPath: null, sourceZipPath, projectDir, logs: logs.join('\n'), buildTimeMs: Date.now() - started, fileCount: files.length };
   }
 
   try {
-    await fs.mkdir(projectDir, { recursive: true });
-    log(`$ flutter create --org ${ORG} --project-name ${PROJECT_NAME} .`);
-    const create = await run(flutterBin(), ['create', '--org', ORG, '--project-name', PROJECT_NAME, '--platforms', 'android', '.'], {
-      cwd: projectDir,
-      timeoutMs: 5 * 60000,
-    });
-    log(create.stdout.slice(-2000));
-    if (create.code !== 0) {
-      log('flutter create failed:\n' + create.stderr.slice(-2000));
-      await writeSource();
-      const sourceZipPath = await zipSource();
+    const ens = await ensureProject(projectId, files, log);
+    if (!ens.ok) {
+      const sourceZipPath = await zipSource(projectId, projectDir);
       return { ok: false, apkPath: null, sourceZipPath, projectDir, logs: logs.join('\n'), buildTimeMs: Date.now() - started, fileCount: files.length };
     }
-
-    // Overlay generated Dart (replaces the default counter app).
-    await run('rm', ['-rf', path.join(projectDir, 'lib')], {});
-    await writeSource();
-    log(`Wrote ${files.length} generated files.`);
 
     log('$ flutter build apk --debug');
     const build = await run(flutterBin(), ['build', 'apk', '--debug'], {
@@ -176,7 +213,7 @@ export async function buildFlutterApk(projectId: string, files: GeneratedFile[])
 
     const apkPath = path.join(projectDir, 'build/app/outputs/flutter-apk/app-debug.apk');
     const built = build.code === 0 && (await exists(apkPath));
-    const sourceZipPath = await zipSource();
+    const sourceZipPath = await zipSource(projectId, projectDir);
 
     if (build.timedOut) log('Build timed out after 20 minutes.');
     return {
@@ -191,12 +228,52 @@ export async function buildFlutterApk(projectId: string, files: GeneratedFile[])
   } catch (e) {
     log('Build error: ' + String((e as Error).message ?? e));
     try {
-      await writeSource();
+      await writeGeneratedFiles(projectDir, files);
     } catch {
       /* ignore */
     }
-    const sourceZipPath = await zipSource();
+    const sourceZipPath = await zipSource(projectId, projectDir);
     return { ok: false, apkPath: null, sourceZipPath, projectDir, logs: logs.join('\n'), buildTimeMs: Date.now() - started, fileCount: files.length };
+  }
+}
+
+/**
+ * Builds the app for the web (HTML renderer, no service worker) so it can be
+ * embedded live in the dashboard's phone frame under
+ * /api/app-factory/preview/<id>/. This is the "virtual emulator on dashboard".
+ */
+export async function buildFlutterWeb(projectId: string, files: GeneratedFile[]): Promise<WebBuildResult> {
+  const started = Date.now();
+  const projectDir = projectDirFor(projectId);
+  const logs: string[] = [];
+  const log = (s: string) => logs.push(s);
+
+  const status = await toolchainStatus();
+  if (!status.flutter) {
+    log('Flutter toolchain not found — cannot build web preview.');
+    return { ok: false, webDir: null, logs: logs.join('\n'), buildTimeMs: Date.now() - started };
+  }
+
+  try {
+    const ens = await ensureProject(projectId, files, log);
+    if (!ens.ok) return { ok: false, webDir: null, logs: logs.join('\n'), buildTimeMs: Date.now() - started };
+
+    log(`$ flutter build web --release --web-renderer html --pwa-strategy none --base-href ${baseHrefFor(projectId)}`);
+    const build = await run(
+      flutterBin(),
+      ['build', 'web', '--release', '--web-renderer', 'html', '--pwa-strategy', 'none', '--base-href', baseHrefFor(projectId)],
+      { cwd: projectDir, timeoutMs: 15 * 60000 },
+    );
+    log(build.stdout.slice(-3000));
+    if (build.stderr) log(build.stderr.slice(-1500));
+
+    const webDir = webDirFor(projectId);
+    const built = build.code === 0 && (await exists(path.join(webDir, 'index.html')));
+    if (build.timedOut) log('Web build timed out.');
+    return { ok: built, webDir: built ? webDir : null, logs: logs.join('\n'), buildTimeMs: Date.now() - started };
+  } catch (e) {
+    log('Web build error: ' + String((e as Error).message ?? e));
+    return { ok: false, webDir: null, logs: logs.join('\n'), buildTimeMs: Date.now() - started };
   }
 }
 

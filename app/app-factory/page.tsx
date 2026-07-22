@@ -100,7 +100,9 @@ export default function AppFactoryPage() {
     });
   }
 
-  const apkReady = projects.find((p) => p.id === projectId)?.status === 'completed';
+  const selected = projects.find((p) => p.id === projectId);
+  const apkReady = selected?.status === 'completed';
+  const webReady = !!selected?.webReady;
 
   return (
     <div className="w-full space-y-6 p-4 sm:p-6 lg:p-8">
@@ -211,7 +213,7 @@ export default function AppFactoryPage() {
             <Smartphone className="h-4 w-4 text-primary" />
             <h2 className="font-display text-lg font-semibold">Device &amp; Emulator</h2>
           </div>
-          <DevicePanel projectId={projectId} apkReady={apkReady} />
+          <DevicePanel projectId={projectId} apkReady={apkReady} webReady={webReady} />
         </Card>
       </div>
 

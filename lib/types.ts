@@ -223,6 +223,7 @@ export interface Project {
   emulatorStatus: string | null;
   runTarget: RunTarget;
   runSerial: string | null;
+  webReady: boolean;
   createdAt: string;
   updatedAt: string;
 }

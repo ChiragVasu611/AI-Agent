@@ -27,6 +27,7 @@ const projectSchema = new Schema({
   emulatorStatus: { type: String, default: null },
   runTarget: { type: String, enum: ['emulator', 'real-device', 'auto'], default: 'auto' },
   runSerial: { type: String, default: null },
+  webReady: { type: Boolean, default: false },
 }, { timestamps: true });
 
 export const Project = models.Project ?? model('Project', projectSchema);
