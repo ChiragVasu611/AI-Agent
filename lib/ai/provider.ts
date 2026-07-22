@@ -7,6 +7,7 @@ export interface AIRequest {
   userPrompt: string;
   temperature?: number;
   maxTokens?: number;
+  timeoutMs?: number;
 }
 
 export interface AIResponse {
@@ -64,25 +65,41 @@ export class OpenRouterProvider implements AIProvider {
       );
     }
 
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        // Optional attribution headers recommended by OpenRouter.
-        'HTTP-Referer': process.env.OPENROUTER_SITE_URL ?? 'http://localhost:3000',
-        'X-Title': 'Enterprise AI Agent Framework',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: req.systemPrompt },
-          { role: 'user', content: req.userPrompt },
-        ],
-        temperature: req.temperature ?? 0.4,
-        max_tokens: req.maxTokens ?? 2048,
-      }),
-    });
+    // Fail fast instead of hanging the pipeline if the model stalls.
+    const timeoutMs = req.timeoutMs ?? Number(process.env.OPENROUTER_TIMEOUT_MS ?? 90_000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          // Optional attribution headers recommended by OpenRouter.
+          'HTTP-Referer': process.env.OPENROUTER_SITE_URL ?? 'http://localhost:3000',
+          'X-Title': 'Enterprise AI Agent Framework',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: req.systemPrompt },
+            { role: 'user', content: req.userPrompt },
+          ],
+          temperature: req.temperature ?? 0.4,
+          max_tokens: req.maxTokens ?? 2048,
+        }),
+      });
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        throw new Error(`OpenRouter request for "${model}" timed out after ${timeoutMs}ms`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!res.ok) {
       const text = await res.text();

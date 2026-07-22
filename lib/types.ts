@@ -300,6 +300,8 @@ export interface Project {
   aabUrl: string | null;
   sourceUrl: string | null;
   docsUrl: string | null;
+  previewUrl: string | null;
+  buildLog: string | null;
   releaseNotes: string | null;
   buildTimeMs: number | null;
   fileCount: number | null;
