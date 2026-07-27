@@ -84,6 +84,7 @@ export default function QaRunPage() {
 
   const isLive = run.status === 'running' || run.status === 'queued';
 
+<<<<<<< Updated upstream
   const bugsByCategory = new Map<string, any[]>();
   BUG_CATEGORIES.forEach((c) => bugsByCategory.set(c, []));
   bugs.forEach((b) => { if (bugsByCategory.has(b.type)) bugsByCategory.get(b.type)!.push(b); });
@@ -106,6 +107,17 @@ export default function QaRunPage() {
     for (let i = 1; i < times.length; i++) diffs.push((times[i] - times[i - 1]) / 1000);
     return diffs.reduce((a, b) => a + b, 0) / diffs.length;
   })();
+=======
+  // The simulation view adapts to the type of testing being executed:
+  // web/browser tests show a landscape browser frame (full page, no crop),
+  // mobile tests show a portrait phone frame.
+  const testTarget = String(run.project?.sourceType ?? run.project?.platform ?? '').toLowerCase();
+  const isBrowser = run.engineMode === 'real_browser'
+    || ['web_app', 'web_url', 'web'].includes(testTarget)
+    || run.project?.platform === 'web';
+  const isIOS = ['ipa', 'app_store_url'].includes(testTarget);
+  const latestShot = screenshots.length > 0 ? screenshots[screenshots.length - 1] : null;
+>>>>>>> Stashed changes
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6 lg:p-8">
@@ -155,51 +167,86 @@ export default function QaRunPage() {
           )}
         </Card>
 
+<<<<<<< Updated upstream
         {/* Device Information */}
+=======
+        {/* Live Device/Browser Preview — adapts to the type of testing */}
+>>>>>>> Stashed changes
         <Card className="border-border bg-card/60 p-5 backdrop-blur">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="font-display text-sm font-semibold">{run.engineMode === 'real_browser' ? 'Live Browser Preview' : 'Live Device Preview'}</h2>
+            <h2 className="font-display text-sm font-semibold">{isBrowser ? 'Live Browser Preview' : 'Live Device Preview'}</h2>
             <Badge variant="secondary" className="text-[10px]">{run.engineMode === 'real_browser' ? 'Real' : 'Simulated'}</Badge>
           </div>
-          {run.engineMode === 'real_browser' ? (
+
+          {isBrowser ? (
             <>
-              <div className="grid aspect-[9/16] max-h-64 place-items-center overflow-hidden rounded-xl border border-border bg-secondary/20">
-                {screenshots.length > 0 ? (
-                  <img src={screenshots[screenshots.length - 1].imageDataUrl} alt="Latest captured screenshot" className="h-full w-full object-cover object-top" />
-                ) : (
-                  <Globe className="h-10 w-10 text-muted-foreground" />
-                )}
+              {/* Landscape browser frame — full page shown with object-contain (no cropping) */}
+              <div className="overflow-hidden rounded-xl border border-border bg-secondary/20">
+                <div className="flex items-center gap-1.5 border-b border-border bg-secondary/40 px-3 py-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-red-400/70" />
+                  <span className="h-2.5 w-2.5 rounded-full bg-amber-400/70" />
+                  <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/70" />
+                  <span className="ml-2 flex-1 truncate rounded-md bg-background/60 px-2 py-0.5 text-[10px] text-muted-foreground" title={run.currentScreen ?? undefined}>
+                    {run.currentScreen ?? 'about:blank'}
+                  </span>
+                </div>
+                <div className="grid aspect-[16/10] max-h-72 place-items-center overflow-hidden bg-white dark:bg-neutral-900">
+                  {latestShot ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={latestShot.imageDataUrl} alt="Latest captured page" className="h-full w-full object-contain object-top" />
+                  ) : (
+                    <Globe className="h-10 w-10 text-muted-foreground" />
+                  )}
+                </div>
               </div>
               <div className="mt-3 space-y-1.5 text-xs">
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Engine</span><span className="truncate">{run.currentDevice ?? '—'}</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Engine</span><span className="truncate">{run.currentDevice ?? 'Headless Chromium'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Current URL</span><span className="max-w-[65%] truncate" title={run.currentScreen ?? undefined}>{run.currentScreen ?? '—'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Viewport</span><span>1366×900</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Pages Visited</span><span>{screenshots.length}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Status</span><span>{isLive ? 'Running' : 'Finished'}</span></div>
               </div>
               <p className="mt-3 text-[11px] text-muted-foreground">
-                This is the last screenshot actually captured by a real headless Chromium session — not a simulated preview.
+                {run.engineMode === 'real_browser'
+                  ? 'Full page from the real headless Chromium session — shown complete, not cropped.'
+                  : 'Simulated web run — the browser frame reflects the run state.'}
               </p>
             </>
           ) : (
             <>
+<<<<<<< Updated upstream
               <div className="grid aspect-[9/16] max-h-64 place-items-center overflow-hidden rounded-xl border border-dashed border-border bg-secondary/20">
                 {screenshots.length > 0 ? (
                   <img src={screenshots[screenshots.length - 1].imageDataUrl} alt="Current screen" className="h-full w-full object-cover object-top" />
                 ) : <Battery className="h-10 w-10 text-muted-foreground" />}
+=======
+              {/* Portrait phone frame — screenshot shown with object-contain (no cropping) */}
+              <div className="mx-auto w-fit rounded-[1.75rem] border-[6px] border-neutral-800 bg-black p-1 shadow-lg">
+                <div className="relative grid aspect-[9/16] max-h-72 w-40 place-items-center overflow-hidden rounded-[1.25rem] bg-secondary/20">
+                  {latestShot ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={latestShot.imageDataUrl} alt="Latest device screenshot" className="h-full w-full object-contain" />
+                  ) : (
+                    <Smartphone className="h-10 w-10 text-muted-foreground" />
+                  )}
+                </div>
+>>>>>>> Stashed changes
               </div>
               <div className="mt-3 space-y-1.5 text-xs">
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Platform</span><span>{isIOS ? 'iOS' : 'Android'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Device</span><span>{run.currentDevice ?? '—'}</span></div>
                 <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Battery className="h-3 w-3" /> Battery</span><span>{isLive ? '78%' : '—'}</span></div>
                 <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Cpu className="h-3 w-3" /> CPU</span><span>{isLive ? '34%' : '—'}</span></div>
                 <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><MemoryStick className="h-3 w-3" /> Memory</span><span>{isLive ? '512 MB' : '—'}</span></div>
                 <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Signal className="h-3 w-3" /> Network</span><span>{isLive ? 'Wi-Fi' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Resolution</span><span>1080x2400</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Resolution</span><span>{isIOS ? '1170x2532' : '1080x2400'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Orientation</span><span>Portrait</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Status</span><span>{isLive ? 'Online' : 'Offline'}</span></div>
               </div>
               <p className="mt-3 text-[11px] text-muted-foreground">
-                No device farm is connected. This panel reflects the simulated run state, not a real device stream.
+                {latestShot
+                  ? 'Latest captured device screenshot — shown complete, not cropped.'
+                  : 'No device farm connected — this panel reflects the simulated run state.'}
               </p>
             </>
           )}
