@@ -10,8 +10,11 @@ import { sleep, log } from '@/lib/qa/runtime-helpers';
 import type { QaBugType, QaSeverity } from '@/lib/types';
 
 const NAV_TIMEOUT_MS = 25000;
-const MAX_PAGES = 5;
+const MAX_PAGES = 12;
 const PERF_BUDGET_MS = 3000;
+const FUNCTIONAL_MODULES = ['functional', 'smoke', 'sanity', 'e2e', 'regression'];
+const GOAL_CTA_RE = /sign\s*up|get\s*started|create\s*account|register|log\s*in|sign\s*in|add\s*to\s*cart|buy\s*now|checkout|subscribe|continue|next|submit|book\s*now|order\s*now|start|try\s*free/i;
+const DESTRUCTIVE_RE = /delete|remove|logout|log\s*out|sign\s*out|cancel|deactivate|close\s*account/i;
 
 interface CheckResult {
   testCaseId: string;
@@ -316,6 +319,166 @@ function runChecksForModules(modules: string[], obs: PageObservation): CheckResu
   return checks;
 }
 
+/**
+ * Active functional testing: actually exercises the page like a user —
+ * inventories interactive controls, fills & validates forms, and clicks the
+ * primary goal/CTA — verifying the app *works*, not just that it loaded.
+ * Every interaction is defensive (try/catch + short timeouts) and skips
+ * destructive controls (delete/logout/etc.).
+ */
+async function runInteractionChecks(page: Page, url: string): Promise<CheckResult[]> {
+  const checks: CheckResult[] = [];
+  let seq = 0;
+  const id = () => `TC-webfn-${url}-${++seq}`;
+
+  // Capture any runtime error thrown while we interact.
+  const interactionErrors: string[] = [];
+  const onErr = (e: Error) => interactionErrors.push(e.message);
+  page.on('pageerror', onErr);
+
+  // Inventory the interactive surface.
+  const inv = await page.evaluate(() => {
+    const q = (sel: string) => document.querySelectorAll(sel).length;
+    return {
+      buttons: q('button, [role="button"], input[type="submit"], input[type="button"]'),
+      links: q('a[href]'),
+      inputs: q('input:not([type="hidden"]), textarea, select'),
+      forms: q('form'),
+      nav: q('nav, [role="navigation"], header a[href]'),
+    };
+  }).catch(() => ({ buttons: 0, links: 0, inputs: 0, forms: 0, nav: 0 }));
+
+  const actionable = inv.buttons + inv.links + inv.inputs;
+  checks.push({
+    testCaseId: id(), name: 'Page exposes interactive controls', module: 'Functional Testing',
+    result: actionable > 0 ? 'pass' : 'fail',
+    expectedResult: 'The page provides usable controls (buttons, links or inputs) for the user.',
+    actualResult: `Found ${inv.buttons} button(s), ${inv.links} link(s), ${inv.inputs} input(s), ${inv.forms} form(s).`,
+    bugType: 'functional', severity: 'high',
+    bugTitle: 'Page has no interactive controls',
+    rootCause: 'The rendered page contains no buttons, links, or form inputs — it may be a dead/blank render or a hydration failure.',
+    suggestedFix: 'Confirm the page renders its interactive UI (check client-side hydration and that content is not blocked).',
+  });
+
+  checks.push({
+    testCaseId: id(), name: 'Primary navigation is present', module: 'Functional Testing',
+    result: inv.nav > 0 ? 'pass' : 'fail',
+    expectedResult: 'A navigation region or header links let the user move through the app.',
+    actualResult: inv.nav > 0 ? `Found ${inv.nav} navigation link(s)/region(s).` : 'No <nav>, role="navigation", or header links were found.',
+    bugType: 'ui', severity: 'medium',
+    bugTitle: 'No navigation region detected',
+    rootCause: 'The page does not expose a navigation region or header links.',
+    suggestedFix: 'Provide a clear navigation region so users can reach the app\'s main sections.',
+  });
+
+  // Form functionality — fill the first form with valid test data and validate it.
+  if (inv.forms > 0 && inv.inputs > 0) {
+    try {
+      const formResult = await page.evaluate(() => {
+        const form = document.querySelector('form');
+        if (!form) return { filled: 0, hasSubmit: false, valid: false };
+        const fields = Array.from(form.querySelectorAll('input, textarea, select')) as Array<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>;
+        let filled = 0;
+        for (const el of fields) {
+          const type = (el.getAttribute('type') || '').toLowerCase();
+          if (['hidden', 'submit', 'button', 'reset', 'file'].includes(type)) continue;
+          let value = 'Test';
+          if (type === 'email') value = 'qa.tester@example.com';
+          else if (type === 'password') value = 'Passw0rd!23';
+          else if (type === 'tel') value = '5551234567';
+          else if (type === 'number') value = '42';
+          else if (type === 'url') value = 'https://example.com';
+          else if (type === 'checkbox' || type === 'radio') { (el as HTMLInputElement).checked = true; filled++; el.dispatchEvent(new Event('change', { bubbles: true })); continue; }
+          (el as HTMLInputElement).value = value;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          filled++;
+        }
+        const hasSubmit = Boolean(form.querySelector('button[type="submit"], input[type="submit"], button:not([type])'));
+        const valid = typeof form.checkValidity === 'function' ? form.checkValidity() : true;
+        return { filled, hasSubmit, valid };
+      });
+      const ok = formResult.filled > 0 && formResult.hasSubmit && formResult.valid;
+      checks.push({
+        testCaseId: id(), name: 'Primary form accepts input and validates', module: 'Functional Testing',
+        result: ok ? 'pass' : 'fail',
+        expectedResult: 'The main form accepts valid test data, has a submit control, and passes client-side validation.',
+        actualResult: `Filled ${formResult.filled} field(s); submit control ${formResult.hasSubmit ? 'present' : 'MISSING'}; validation ${formResult.valid ? 'passed' : 'FAILED with valid test data'}.`,
+        bugType: 'functional', severity: 'high',
+        bugTitle: 'Primary form is not functional',
+        rootCause: 'The form is missing a submit control or rejects otherwise-valid input, so users cannot complete it.',
+        suggestedFix: 'Ensure the form has a submit button and that its validation accepts correctly-formatted input.',
+      });
+    } catch (e) {
+      checks.push({
+        testCaseId: id(), name: 'Primary form accepts input and validates', module: 'Functional Testing',
+        result: 'fail',
+        expectedResult: 'The main form can be filled and validated.',
+        actualResult: `Interacting with the form threw an error: ${(e as Error).message}`,
+        bugType: 'functional', severity: 'high',
+        bugTitle: 'Form interaction throws an error',
+        rootCause: 'An exception was thrown while filling the form.',
+        suggestedFix: 'Check the form field event handlers for errors.',
+      });
+    }
+  }
+
+  // Goal / CTA reachability — find the primary call-to-action and exercise it.
+  let goalActioned = false;
+  try {
+    const cta = page.getByRole('link', { name: GOAL_CTA_RE }).or(page.getByRole('button', { name: GOAL_CTA_RE })).first();
+    const ctaCount = await cta.count();
+    if (ctaCount > 0) {
+      const label = ((await cta.textContent().catch(() => '')) || '').trim().slice(0, 40);
+      const enabled = await cta.isEnabled().catch(() => false);
+      const destructive = DESTRUCTIVE_RE.test(label);
+      if (enabled && !destructive) {
+        await cta.click({ timeout: 4000 }).catch(() => { /* click may navigate/detach */ });
+        await sleep(1200);
+        goalActioned = true;
+      }
+      checks.push({
+        testCaseId: id(), name: 'Primary user goal (CTA) is actionable', module: 'E2E Testing',
+        result: enabled ? 'pass' : 'fail',
+        expectedResult: 'A prominent call-to-action (sign up, add to cart, checkout, submit, …) is present and clickable.',
+        actualResult: enabled ? `CTA "${label}" is present and was exercised without a crash.` : `CTA "${label}" is present but disabled.`,
+        bugType: 'functional', severity: 'high',
+        bugTitle: 'Primary call-to-action is not actionable',
+        rootCause: 'The main user-goal control is disabled or cannot be interacted with.',
+        suggestedFix: 'Ensure the primary CTA is enabled and wired to its intended action.',
+      });
+    } else {
+      checks.push({
+        testCaseId: id(), name: 'Primary user goal (CTA) is actionable', module: 'E2E Testing',
+        result: 'pass',
+        expectedResult: 'A recognizable call-to-action drives the primary user goal.',
+        actualResult: 'No standard call-to-action text was detected on this page (informational).',
+      });
+    }
+  } catch {
+    // getByRole/count can throw on navigation — treat as non-fatal.
+  }
+
+  await sleep(300);
+  page.off('pageerror', onErr);
+
+  // Interaction stability — did our clicks/typing surface any runtime errors?
+  checks.push({
+    testCaseId: id(), name: 'No runtime errors during user interaction', module: 'Functional Testing',
+    result: interactionErrors.length === 0 ? 'pass' : 'fail',
+    expectedResult: 'Interacting with the page (typing, clicking the CTA) raises no uncaught exceptions.',
+    actualResult: interactionErrors.length === 0
+      ? `Interactions completed cleanly${goalActioned ? ' (CTA exercised)' : ''}.`
+      : `${interactionErrors.length} error(s) during interaction: ${interactionErrors.slice(0, 3).join(' | ')}`,
+    bugType: 'crash', severity: 'high',
+    bugTitle: 'Uncaught error triggered by user interaction',
+    rootCause: 'A user interaction (input or click) triggered an unhandled JavaScript exception.',
+    suggestedFix: 'Reproduce the interaction with DevTools open and fix the throwing handler.',
+  });
+
+  return checks;
+}
+
 export async function runWebTestExecution(runId: string) {
   await connectToDatabase();
 
@@ -395,7 +558,28 @@ export async function runWebTestExecution(runId: string) {
         await log(runId, 'automation', 'warn', `Could not capture a screenshot for ${url}.`);
       }
 
-      const checks = runChecksForModules(run.modules, obs);
+      // Discover internal links BEFORE interacting — interactions can navigate away.
+      if (visited.size < MAX_PAGES) {
+        try {
+          const links: string[] = await page.evaluate((origin: string) => Array.from(document.querySelectorAll('a[href]'))
+            .map((a) => (a as HTMLAnchorElement).href)
+            .filter((href) => href.startsWith(origin)), new URL(url).origin);
+          for (const link of links) {
+            const clean = link.split('#')[0];
+            if (!visited.has(clean) && !queue.includes(clean) && clean !== url) queue.push(clean);
+            if (queue.length + visited.size >= MAX_PAGES * 2) break;
+          }
+        } catch {
+          // link discovery is best-effort
+        }
+      }
+
+      const wantsFunctional = run.modules.some((m: string) => FUNCTIONAL_MODULES.includes(m));
+      run.currentStep = wantsFunctional ? 'Running functional interactions' : 'Analyzing page';
+      await run.save();
+      const staticChecks = runChecksForModules(run.modules, obs);
+      const interactionChecks = wantsFunctional ? await runInteractionChecks(page, url) : [];
+      const checks = [...staticChecks, ...interactionChecks];
       for (const check of checks) {
         totalCases += 1;
         const failedStepNumber = check.result === 'fail' ? 1 : null;
@@ -445,21 +629,6 @@ export async function runWebTestExecution(runId: string) {
           await QaTestCaseResult.findByIdAndUpdate(caseDoc._id, { bugId: bug._id });
           severityCounts[severity] += 1;
           await log(runId, 'error', 'error', `[${check.module}] FAILED: ${check.name} — bug ${bugNumber} created.`);
-        }
-      }
-
-      if (visited.size < MAX_PAGES) {
-        try {
-          const links: string[] = await page.evaluate((origin: string) => Array.from(document.querySelectorAll('a[href]'))
-            .map((a) => (a as HTMLAnchorElement).href)
-            .filter((href) => href.startsWith(origin)), new URL(url).origin);
-          for (const link of links) {
-            const clean = link.split('#')[0];
-            if (!visited.has(clean) && !queue.includes(clean) && clean !== url) queue.push(clean);
-            if (queue.length + visited.size >= MAX_PAGES * 2) break;
-          }
-        } catch {
-          // link discovery is best-effort
         }
       }
     }

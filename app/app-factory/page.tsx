@@ -127,93 +127,179 @@ export default function AppFactoryPage() {
         </div>
       </header>
 
-      {/* Row 1 — Reference App (left) + Device & Emulator (right) */}
-      <div className="grid items-start gap-6 xl:grid-cols-2">
-        {/* Analyze & Build form */}
-        <Card className="relative overflow-hidden border-border bg-card/60 p-6 backdrop-blur">
-          <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-primary/10 blur-3xl" />
-          <div className="flex items-center gap-2">
-            <Globe className="h-4 w-4 text-primary" />
-            <h2 className="font-display text-lg font-semibold">Reference App</h2>
+      {/* Row 1 — Reference App + Device */}
+      <div className="grid gap-6 xl:grid-cols-[1.6fr_1fr]">
+        {/* ========================= Reference App ========================= */}
+        <Card className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-sm">
+          <div className="border-b bg-gradient-to-r from-primary/5 via-background to-background px-6 py-5">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10">
+                <Globe className="h-5 w-5 text-primary" />
+              </div>
+
+              <div>
+                <h2 className="font-display text-xl font-semibold">
+                  Reference Application
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Paste a Play Store or App Store link and let AI analyze &
+                  recreate the application.
+                </p>
+              </div>
+            </div>
           </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Provide a Google Play or Apple App Store URL, or any public reference app page.
-          </p>
-          <form onSubmit={onSubmit} autoComplete="off" className="mt-5 space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="referenceUrl" className="flex items-center gap-1.5">
-                <Globe className="h-3.5 w-3.5" /> Reference App URL
+
+          <form
+              onSubmit={onSubmit}
+              autoComplete="off"
+              className="space-y-6 p-6"
+          >
+            {/* URL */}
+            <div className="space-y-2">
+              <Label htmlFor="referenceUrl">
+                Reference Application URL
               </Label>
+
               <Input
-                id="referenceUrl"
-                name="referenceUrl"
-                type="url"
-                autoComplete="off"
-                placeholder="https://play.google.com/store/apps/details?id=com.example.app"
+                  id="referenceUrl"
+                  name="referenceUrl"
+                  type="url"
+                  placeholder="https://play.google.com/store/apps/details?id=com.example.app"
+                  className="h-12 rounded-xl"
               />
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label className="flex items-center gap-1.5">
-                  <Apple className="h-3.5 w-3.5" /> Google Play URL
-                </Label>
-                <Input name="googlePlay" type="url" autoComplete="off" placeholder="play.google.com/…" />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="flex items-center gap-1.5">
-                  <Apple className="h-3.5 w-3.5" /> Apple App Store URL
-                </Label>
-                <Input name="appleStore" type="url" autoComplete="off" placeholder="apps.apple.com/…" />
+            {/* Optional Apple */}
+            <div className="space-y-2">
+              <Label className="flex items-center gap-2">
+                <Apple className="h-4 w-4" />
+                Apple App Store URL (Optional)
+              </Label>
+
+              <Input
+                  name="appleStore"
+                  type="url"
+                  placeholder="https://apps.apple.com/..."
+                  className="h-11 rounded-xl"
+              />
+            </div>
+
+            {/* Divider */}
+            <div className="border-t" />
+
+            {/* Configuration */}
+            <div>
+              <h3 className="mb-4 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                Build Configuration
+              </h3>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Target Platform</Label>
+
+                  <Select
+                      value={platform}
+                      onValueChange={setPlatform}
+                  >
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+
+                    <SelectContent>
+                      <SelectItem value="flutter">
+                        Flutter
+                      </SelectItem>
+
+                      <SelectItem value="react-native">
+                        React Native
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Run Target</Label>
+
+                  <Select
+                      value={runTarget}
+                      onValueChange={setRunTarget}
+                  >
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+
+                    <SelectContent>
+                      <SelectItem value="auto">
+                        Auto Detect
+                      </SelectItem>
+
+                      <SelectItem value="emulator">
+                        Virtual Emulator
+                      </SelectItem>
+
+                      <SelectItem value="real-device">
+                        Real Device
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label>Target Platform</Label>
-                <Select value={platform} onValueChange={setPlatform}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="flutter">Flutter</SelectItem>
-                    <SelectItem value="react-native">React Native</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="flex items-center gap-1.5">
-                  <Smartphone className="h-3.5 w-3.5" /> Run Target
-                </Label>
-                <Select value={runTarget} onValueChange={setRunTarget}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="auto">Auto-detect</SelectItem>
-                    <SelectItem value="emulator">Virtual Emulator</SelectItem>
-                    <SelectItem value="real-device">Real Device</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
+            <motion.div
+                whileHover={{ scale: 1.01 }}
+                whileTap={{ scale: 0.99 }}
+            >
+              <Button
+                  type="submit"
+                  disabled={pending}
+                  className="h-12 w-full rounded-xl gap-2 text-base"
+              >
+                {pending ? (
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                ) : (
+                    <Sparkles className="h-5 w-5" />
+                )}
 
-            <motion.div whileHover={{ scale: 1.005 }} whileTap={{ scale: 0.995 }}>
-              <Button type="submit" disabled={pending} className="w-full gap-2 sm:w-auto">
-                {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                Analyze & Build
+                Analyze & Build Application
               </Button>
             </motion.div>
           </form>
         </Card>
 
-        {/* Device & Emulator — to the right of the Reference URL section */}
-        <Card className="border-border bg-card/60 p-6 backdrop-blur">
-          <div className="mb-4 flex items-center gap-2">
-            <Smartphone className="h-4 w-4 text-primary" />
-            <h2 className="font-display text-lg font-semibold">Device &amp; Emulator</h2>
+        {/* ========================= Device ========================= */}
+        <Card className="overflow-hidden rounded-3xl border border-border/60 bg-card shadow-sm">
+          <div className="border-b bg-gradient-to-r from-primary/5 via-background to-background px-6 py-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10">
+                  <Smartphone className="h-5 w-5 text-primary" />
+                </div>
+
+                <div>
+                  <h2 className="font-display text-xl font-semibold">
+                    Live Emulator
+                  </h2>
+
+                  <p className="text-sm text-muted-foreground">
+                    Preview and run the generated application instantly.
+                  </p>
+                </div>
+              </div>
+
+              <Badge variant="secondary">
+                {apkReady || webReady ? "Ready" : "Waiting"}
+              </Badge>
+            </div>
           </div>
-          <DevicePanel projectId={projectId} apkReady={apkReady} webReady={webReady} />
+
+          <div className="p-6">
+            <DevicePanel
+                projectId={projectId}
+                apkReady={apkReady}
+                webReady={webReady}
+            />
+          </div>
         </Card>
       </div>
 

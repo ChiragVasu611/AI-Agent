@@ -3,7 +3,7 @@
 import { useEffect, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Loader2, Play, UploadCloud } from 'lucide-react';
+import { Loader2, Play, Trash2, UploadCloud } from 'lucide-react';
 import { toast } from 'sonner';
 import { startTestExecution } from '@/app/qa/actions';
 import { QA_MODULES, DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
@@ -39,7 +39,27 @@ export default function TestExecutionPage() {
   const [selectedModules, setSelectedModules] = useState<string[]>(DEFAULT_SMOKE_MODULES);
   const [runs, setRuns] = useState<any[]>([]);
   const [appFileName, setAppFileName] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const isBinarySource = sourceType in BINARY_EXTENSIONS;
+
+  async function onDeleteRun(e: React.MouseEvent, id: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm('Permanently delete this test run and all of its execution data (results, screenshots, logs, bugs)? This cannot be undone.')) return;
+    setDeletingId(id);
+    try {
+      const res = await fetch(`/api/qa/runs/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error ?? 'Failed to delete test run');
+        return;
+      }
+      setRuns((prev) => prev.filter((r) => r.id !== id));
+      toast.success('Test run permanently deleted');
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -176,16 +196,29 @@ export default function TestExecutionPage() {
         ) : (
           <div className="divide-y divide-border">
             {runs.map((r) => (
-              <Link key={r.id} href={`/qa/runs/${r.id}`} className="flex items-center gap-3 py-3 transition hover:bg-secondary/50">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">{r.project?.name ?? 'Unknown app'}</div>
-                  <div className="truncate text-xs text-muted-foreground">
-                    {r.modules?.length ?? 0} module(s) · {new Date(r.createdAt).toLocaleString()}
+              <div key={r.id} className="flex items-center gap-3 py-3 transition hover:bg-secondary/50">
+                <Link href={`/qa/runs/${r.id}`} className="flex min-w-0 flex-1 items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{r.project?.name ?? 'Unknown app'}</div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {r.modules?.length ?? 0} module(s) · {new Date(r.createdAt).toLocaleString()}
+                    </div>
                   </div>
-                </div>
-                {r.status === 'running' && <span className="text-xs text-muted-foreground">{r.progress}%</span>}
-                <Badge variant="outline" className="text-xs capitalize">{r.status}</Badge>
-              </Link>
+                  {r.status === 'running' && <span className="text-xs text-muted-foreground">{r.progress}%</span>}
+                  <Badge variant="outline" className="text-xs capitalize">{r.status}</Badge>
+                </Link>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Delete test run"
+                  title="Delete test run permanently"
+                  disabled={deletingId === r.id}
+                  onClick={(e) => onDeleteRun(e, r.id)}
+                  className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                >
+                  {deletingId === r.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                </Button>
+              </div>
             ))}
           </div>
         )}
