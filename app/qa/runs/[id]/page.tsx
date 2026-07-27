@@ -4,14 +4,30 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import {
-  ArrowLeft, Battery, Clock, Cpu, MemoryStick, Signal, Smartphone,
-  CheckCircle2, XCircle, ShieldAlert, SkipForward, Hourglass, Globe,
+  ArrowLeft, Battery, Bug as BugIcon, Clock, Cpu,
+  CheckCircle2, XCircle, ShieldAlert, SkipForward, Hourglass, Globe, Gauge, MemoryStick, Signal,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { LiveConsole } from '@/components/modules/qa/live-console';
 import { BugCard } from '@/components/modules/qa/bug-card';
+
+const BUG_CATEGORIES = [
+  'functional', 'ui', 'api', 'performance', 'security', 'crash', 'anr', 'accessibility', 'compatibility',
+];
+
+const STATUS_BADGE: Record<string, string> = {
+  pass: 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30',
+  fail: 'bg-red-500/15 text-red-500 border-red-500/30',
+  blocked: 'bg-amber-500/15 text-amber-500 border-amber-500/30',
+  skipped: 'bg-secondary text-muted-foreground',
+  pending: 'bg-sky-500/15 text-sky-500 border-sky-500/30',
+};
 
 function elapsedLabel(startedAt: string | null): string {
   if (!startedAt) return '—';
@@ -26,6 +42,7 @@ const STATUS_COLOR: Record<string, string> = {
   running: 'bg-primary/15 text-primary',
   passed: 'bg-success/15 text-success',
   failed: 'bg-destructive/15 text-destructive',
+  partial: 'bg-amber-500/15 text-amber-500',
   cancelled: 'bg-secondary text-muted-foreground',
 };
 
@@ -36,21 +53,25 @@ export default function QaRunPage() {
   const [logs, setLogs] = useState<any[]>([]);
   const [screenshots, setScreenshots] = useState<any[]>([]);
   const [bugs, setBugs] = useState<any[]>([]);
+  const [testCases, setTestCases] = useState<any[]>([]);
+  const [detailTab, setDetailTab] = useState('results');
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      const [runRes, logsRes, shotsRes, bugsRes] = await Promise.all([
+      const [runRes, logsRes, shotsRes, bugsRes, tcRes] = await Promise.all([
         fetch(`/api/qa/runs/${runId}`).then((r) => r.json()),
         fetch(`/api/qa/logs?runId=${runId}`).then((r) => r.json()),
         fetch(`/api/qa/screenshots?runId=${runId}`).then((r) => r.json()),
         fetch(`/api/qa/bugs?runId=${runId}`).then((r) => r.json()),
+        fetch(`/api/qa/test-cases?runId=${runId}`).then((r) => r.json()),
       ]);
       if (cancelled) return;
       setRun(runRes.run);
       setLogs(logsRes.logs ?? []);
       setScreenshots(shotsRes.screenshots ?? []);
       setBugs(bugsRes.bugs ?? []);
+      setTestCases(tcRes.testCases ?? []);
     }
     load();
     const interval = setInterval(load, 1500);
@@ -63,24 +84,47 @@ export default function QaRunPage() {
 
   const isLive = run.status === 'running' || run.status === 'queued';
 
+  const bugsByCategory = new Map<string, any[]>();
+  BUG_CATEGORIES.forEach((c) => bugsByCategory.set(c, []));
+  bugs.forEach((b) => { if (bugsByCategory.has(b.type)) bugsByCategory.get(b.type)!.push(b); });
+
+  const executionTimeline = screenshots
+    .map((s) => ({ ...s, testCase: testCases.find((t) => (t.scenario ?? t.name) === s.testStep) }))
+    .slice()
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+    .map((s, i, arr) => ({
+      ...s,
+      stepNumber: i + 1,
+      durationSeconds: i > 0 ? Math.max(0, Math.round((new Date(s.createdAt).getTime() - new Date(arr[i - 1].createdAt).getTime()) / 1000)) : null,
+    }));
+
+  const evaluatedCases = testCases.filter((t) => (t.result ?? '') !== 'pending');
+  const avgExecutionSeconds = (() => {
+    const times = evaluatedCases.map((t) => new Date(t.createdAt).getTime()).sort((a, b) => a - b);
+    if (times.length < 2) return null;
+    const diffs: number[] = [];
+    for (let i = 1; i < times.length; i++) diffs.push((times[i] - times[i - 1]) / 1000);
+    return diffs.reduce((a, b) => a + b, 0) / diffs.length;
+  })();
+
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6 lg:p-8">
       <div className="flex items-center gap-3">
-        <Link href="/qa" className="text-muted-foreground transition hover:text-foreground">
+        <Link href="/qa/runs" className="text-muted-foreground transition hover:text-foreground">
           <ArrowLeft className="h-5 w-5" />
         </Link>
         <div className="flex-1">
           <h1 className="font-display text-xl font-semibold tracking-tight">{run.project?.name ?? 'Test Run'}</h1>
-          <p className="text-xs text-muted-foreground">{run.modules?.length ?? 0} module(s) · {run.project?.sourceType}</p>
+          <p className="text-xs text-muted-foreground">RUN-{run.runNumber} · {run.modules?.length ?? 0} module(s) · {run.project?.sourceType}</p>
         </div>
         {run.engineMode === 'real_browser' && <Badge variant="outline" className="text-[10px]">Real Browser Execution</Badge>}
         <Badge className={STATUS_COLOR[run.status]}>{run.status}</Badge>
       </div>
 
+      {/* Execution Summary + Device Information — unchanged from the original run monitor. */}
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Live Execution Monitoring */}
         <Card className="border-border bg-card/60 p-5 backdrop-blur lg:col-span-2">
-          <h2 className="mb-3 font-display text-sm font-semibold">Live Execution Monitoring</h2>
+          <h2 className="mb-3 font-display text-sm font-semibold">Execution Summary</h2>
           <div className="mb-3">
             <Progress value={run.progress} className="h-2" />
             <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
@@ -111,7 +155,7 @@ export default function QaRunPage() {
           )}
         </Card>
 
-        {/* Live Device/Browser Preview */}
+        {/* Device Information */}
         <Card className="border-border bg-card/60 p-5 backdrop-blur">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="font-display text-sm font-semibold">{run.engineMode === 'real_browser' ? 'Live Browser Preview' : 'Live Device Preview'}</h2>
@@ -139,8 +183,10 @@ export default function QaRunPage() {
             </>
           ) : (
             <>
-              <div className="grid aspect-[9/16] max-h-64 place-items-center rounded-xl border border-dashed border-border bg-secondary/20">
-                <Smartphone className="h-10 w-10 text-muted-foreground" />
+              <div className="grid aspect-[9/16] max-h-64 place-items-center overflow-hidden rounded-xl border border-dashed border-border bg-secondary/20">
+                {screenshots.length > 0 ? (
+                  <img src={screenshots[screenshots.length - 1].imageDataUrl} alt="Current screen" className="h-full w-full object-cover object-top" />
+                ) : <Battery className="h-10 w-10 text-muted-foreground" />}
               </div>
               <div className="mt-3 space-y-1.5 text-xs">
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Device</span><span>{run.currentDevice ?? '—'}</span></div>
@@ -184,43 +230,141 @@ export default function QaRunPage() {
         </Card>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card className="border-border bg-card/60 p-5 backdrop-blur">
-          <h2 className="mb-3 flex items-center gap-1.5 font-display text-sm font-semibold"><Clock className="h-4 w-4" /> Live Console</h2>
-          <div className="h-80">
-            <LiveConsole logs={logs} />
-          </div>
-        </Card>
+      {/* Detailed run report — Test Case Results / AI Bug Report / Screenshots / Execution Timeline / Performance Metrics / Live Logs */}
+      <Card className="border-border bg-card/60 backdrop-blur">
+        <Tabs value={detailTab} onValueChange={setDetailTab}>
+          <TabsList className="flex-wrap">
+            <TabsTrigger value="results">Test Case Results</TabsTrigger>
+            <TabsTrigger value="bugs">AI Bug Report ({bugs.length})</TabsTrigger>
+            <TabsTrigger value="screenshots">Screenshots</TabsTrigger>
+            <TabsTrigger value="timeline">Execution Timeline</TabsTrigger>
+            <TabsTrigger value="performance">Performance Metrics</TabsTrigger>
+            <TabsTrigger value="logs">Live Logs</TabsTrigger>
+          </TabsList>
 
-        <Card className="border-border bg-card/60 p-5 backdrop-blur">
-          <h2 className="mb-3 font-display text-sm font-semibold">Screenshot Timeline</h2>
-          <div className="grid max-h-80 grid-cols-3 gap-2 overflow-y-auto">
-            {screenshots.length === 0 && <p className="col-span-3 py-8 text-center text-xs text-muted-foreground">No screenshots yet.</p>}
-            {screenshots.map((s) => (
-              <div key={s.id} className="overflow-hidden rounded-lg border border-border">
-                <img src={s.imageDataUrl} alt={s.screenName} className="h-24 w-full object-cover" />
-                <div className="p-1.5">
-                  <div className="truncate text-[10px] font-medium">{s.screenName}</div>
-                  <div className="truncate text-[9px] text-muted-foreground">{new Date(s.createdAt).toLocaleTimeString()}</div>
-                </div>
+          <TabsContent value="results" className="max-h-[500px] overflow-y-auto p-5">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Test Case ID</TableHead><TableHead>Scenario</TableHead><TableHead>Module</TableHead>
+                  <TableHead>Status</TableHead><TableHead>Expected</TableHead><TableHead>Actual</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {testCases.length === 0 ? (
+                  <TableRow><TableCell colSpan={6} className="py-8 text-center text-xs text-muted-foreground">No test case results recorded for this run.</TableCell></TableRow>
+                ) : testCases.map((t: any) => (
+                  <TableRow key={t.id}>
+                    <TableCell className="font-mono text-xs">{t.testCaseId}</TableCell>
+                    <TableCell className="max-w-[220px] truncate text-xs">{t.scenario ?? t.name}</TableCell>
+                    <TableCell className="text-xs">{t.module}</TableCell>
+                    <TableCell><Badge className={`${STATUS_BADGE[t.result] ?? ''} text-[10px]`}>{t.result}</Badge></TableCell>
+                    <TableCell className="max-w-[200px] truncate text-xs text-muted-foreground">{t.expectedResult ?? '—'}</TableCell>
+                    <TableCell className="max-w-[200px] truncate text-xs text-muted-foreground">{t.actualResult ?? '—'}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TabsContent>
+
+          <TabsContent value="bugs" className="max-h-[500px] overflow-y-auto p-5">
+            {bugs.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">No bugs detected in this run.</p>
+            ) : (
+              <div className="space-y-5">
+                {BUG_CATEGORIES.filter((c) => (bugsByCategory.get(c)?.length ?? 0) > 0).map((c) => (
+                  <div key={c}>
+                    <div className="mb-2 flex items-center gap-2">
+                      <h3 className="text-sm font-semibold capitalize">{c}</h3>
+                      <Badge variant="secondary" className="text-[10px]">{bugsByCategory.get(c)!.length}</Badge>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {bugsByCategory.get(c)!.map((b) => <BugCard key={b.id} bug={b} />)}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </Card>
-      </div>
+            )}
+          </TabsContent>
 
-      <div>
-        <h2 className="mb-3 font-display text-lg font-semibold">Bugs Found ({bugs.length})</h2>
-        {bugs.length === 0 ? (
-          <Card className="border-dashed border-border bg-card/40 p-8 text-center text-sm text-muted-foreground">
-            No bugs detected yet.
-          </Card>
-        ) : (
-          <div className="grid gap-3 lg:grid-cols-2">
-            {bugs.map((b) => <BugCard key={b.id} bug={b} />)}
-          </div>
-        )}
-      </div>
+          <TabsContent value="screenshots" className="max-h-[500px] overflow-y-auto p-5">
+            {screenshots.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">No screenshots captured for this run.</p>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+                {screenshots.map((s: any) => (
+                  <div key={s.id} className="overflow-hidden rounded-lg border border-border">
+                    <img src={s.imageDataUrl} alt={s.screenName} className="h-28 w-full object-cover" />
+                    <div className="p-1.5">
+                      <div className="truncate text-[10px] font-medium">{s.screenName}</div>
+                      <div className="truncate text-[9px] text-muted-foreground">{new Date(s.createdAt).toLocaleTimeString()}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value="timeline" className="max-h-[500px] overflow-y-auto p-5">
+            {executionTimeline.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">No executed steps recorded for this run.</p>
+            ) : (
+              <div className="space-y-2">
+                {executionTimeline.map((e: any) => (
+                  <div key={e.id} className="flex items-center gap-3 rounded-lg border border-border p-2.5">
+                    <img src={e.imageDataUrl} alt={e.screenName} className="h-12 w-8 shrink-0 rounded object-cover" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-muted-foreground">#{e.stepNumber}</span>
+                        <span className="font-medium">{e.testCase?.testCaseId ?? '—'}</span>
+                        {e.testCase && <Badge className={`${STATUS_BADGE[e.testCase.result] ?? ''} text-[9px]`}>{e.testCase.result}</Badge>}
+                      </div>
+                      <div className="truncate text-[11px] text-muted-foreground">{e.screenName} · {new Date(e.createdAt).toLocaleTimeString()}</div>
+                    </div>
+                    <div className="shrink-0 text-[11px] text-muted-foreground">{e.durationSeconds != null ? `${e.durationSeconds}s` : '—'}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value="performance" className="p-5">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <Card className="border-border bg-card/40 p-4">
+                <Gauge className="h-4 w-4 text-muted-foreground" />
+                <div className="mt-2 font-display text-xl font-semibold">{run.performanceScore != null ? run.performanceScore : '—'}</div>
+                <div className="text-[11px] text-muted-foreground">Performance Score</div>
+              </Card>
+              <Card className="border-border bg-card/40 p-4">
+                <Clock className="h-4 w-4 text-muted-foreground" />
+                <div className="mt-2 font-display text-xl font-semibold">{elapsedLabel(run.startedAt)}</div>
+                <div className="text-[11px] text-muted-foreground">Total Execution Time</div>
+              </Card>
+              <Card className="border-border bg-card/40 p-4">
+                <Hourglass className="h-4 w-4 text-muted-foreground" />
+                <div className="mt-2 font-display text-xl font-semibold">{avgExecutionSeconds != null ? `${avgExecutionSeconds.toFixed(1)}s` : '—'}</div>
+                <div className="text-[11px] text-muted-foreground">Avg. Time per Test Case</div>
+              </Card>
+              <Card className="border-border bg-card/40 p-4">
+                <BugIcon className="h-4 w-4 text-muted-foreground" />
+                <div className="mt-2 font-display text-xl font-semibold">{bugs.length}</div>
+                <div className="text-[11px] text-muted-foreground">Bugs Found</div>
+              </Card>
+            </div>
+            {run.performanceScore == null && (
+              <p className="mt-4 text-xs text-muted-foreground">
+                A performance score is only computed for catalog Test Execution runs with performance-related modules selected.
+              </p>
+            )}
+          </TabsContent>
+
+          <TabsContent value="logs" className="p-5">
+            <div className="h-96">
+              <LiveConsole logs={logs} />
+            </div>
+          </TabsContent>
+        </Tabs>
+      </Card>
     </div>
   );
 }

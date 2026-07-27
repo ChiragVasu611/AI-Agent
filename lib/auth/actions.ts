@@ -34,6 +34,8 @@ export async function signIn(email: string, password: string) {
   const valid = await verifyPassword(password, user.passwordHash);
   if (!valid) return { error: 'Invalid email or password.' };
 
+  if (user.isActive === false) return { error: 'This account has been deactivated. Contact an administrator.' };
+
   const token = await signSessionToken(String(user._id), user.role);
   await setSessionCookie(token);
 

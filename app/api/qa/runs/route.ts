@@ -12,10 +12,15 @@ export async function GET(req: Request) {
 
   const params = new URL(req.url).searchParams;
   const limit = Number(params.get('limit') ?? '20');
+  const page = Math.max(1, Number(params.get('page') ?? '1') || 1);
+  const pageSize = params.get('pageSize') ? Math.max(1, Number(params.get('pageSize'))) : null;
   const search = params.get('search')?.toLowerCase().trim() || null;
   const device = params.get('device') || null;
   const status = params.get('status') || null;
   const executedBy = params.get('executedBy')?.toLowerCase().trim() || null;
+  // moduleType: 'catalog' | 'uploaded' (which execution engine/module was used),
+  // or one of the QA_MODULES keys (functional, ui_ux, api, ...) for catalog runs.
+  const moduleType = params.get('moduleType') || null;
   const dateFrom = params.get('dateFrom') ? new Date(params.get('dateFrom') as string) : null;
   const dateTo = params.get('dateTo') ? new Date(params.get('dateTo') as string) : null;
   const sort = params.get('sort') ?? 'latest';
@@ -26,6 +31,8 @@ export async function GET(req: Request) {
   if (status) query.status = status;
   if (executedBy) query.executedByName = { $regex: executedBy, $options: 'i' };
   if (device) query.currentDevice = { $regex: device, $options: 'i' };
+  if (moduleType === 'catalog' || moduleType === 'uploaded') query.sourceMode = moduleType;
+  else if (moduleType) query.modules = moduleType;
   if (dateFrom || dateTo) {
     query.createdAt = {
       ...(dateFrom ? { $gte: dateFrom } : {}),
@@ -53,7 +60,9 @@ export async function GET(req: Request) {
   if (search) {
     runs = runs.filter((r: any) =>
       r.project?.name?.toLowerCase().includes(search)
+      || r.project?.appDisplayName?.toLowerCase().includes(search)
       || r.runName?.toLowerCase().includes(search)
+      || r.id?.toLowerCase().includes(search)
       || String(r.runNumber).includes(search));
   }
 
@@ -71,9 +80,23 @@ export async function GET(req: Request) {
     case 'bugCount':
       runs.sort((a: any, b: any) => b.bugCount - a.bugCount);
       break;
+    case 'passed':
+      runs.sort((a: any, b: any) => (b.passedCases ?? 0) - (a.passedCases ?? 0));
+      break;
+    case 'failed':
+      runs.sort((a: any, b: any) => (b.failedCases ?? 0) - (a.failedCases ?? 0));
+      break;
     default:
       runs.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
-  return NextResponse.json({ runs: runs.slice(0, limit), total: runs.length });
+  const total = runs.length;
+
+  if (pageSize) {
+    const start = (page - 1) * pageSize;
+    runs = runs.slice(start, start + pageSize);
+    return NextResponse.json({ runs, total, page, pageSize });
+  }
+
+  return NextResponse.json({ runs: runs.slice(0, limit), total });
 }

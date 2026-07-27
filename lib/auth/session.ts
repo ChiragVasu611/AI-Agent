@@ -70,9 +70,10 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 
   await connectToDatabase();
   const user = await User.findById(userId).lean<{
-    _id: unknown; email: string; fullName: string; role: string;
+    _id: unknown; email: string; fullName: string; role: string; isActive?: boolean;
   }>();
   if (!user) return null;
+  if (user.isActive === false) return null;
 
   const role = user.role ?? 'employee';
   return {

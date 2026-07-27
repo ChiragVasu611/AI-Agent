@@ -13,6 +13,7 @@ export const ROLES = [
   'designer',
   'marketing',
   'finance',
+  'seo',
   'employee',
   'guest',
 ] as const;
@@ -32,6 +33,7 @@ export const PERMISSIONS = [
   'workspace:designer',
   'workspace:marketing',
   'workspace:finance',
+  'workspace:seo',
 
   'employee.read',
   'employee.create',
@@ -41,6 +43,8 @@ export const PERMISSIONS = [
   'attendance.manage',
   'payroll.view',
   'payroll.manage',
+
+  'admin.manage',
 ] as const;
 
 export type Permission = typeof PERMISSIONS[number];
@@ -52,7 +56,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[] | '*'> = {
   super_admin: '*',
   company_admin: [
     'workspace:enterprise', 'workspace:hr', 'workspace:qa', 'workspace:app_factory',
-    'workspace:designer', 'workspace:marketing', 'workspace:finance',
+    'workspace:designer', 'workspace:marketing', 'workspace:finance', 'workspace:seo',
     'employee.read', 'employee.create', 'employee.update', 'employee.delete',
     'recruitment.manage', 'attendance.manage', 'payroll.view', 'payroll.manage',
   ],
@@ -65,6 +69,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[] | '*'> = {
   designer: ['workspace:designer'],
   marketing: ['workspace:marketing'],
   finance: ['workspace:finance', 'payroll.view', 'payroll.manage'],
+  seo: ['workspace:seo'],
   employee: [],
   guest: [],
 };
@@ -89,6 +94,7 @@ export const ROLE_HOME: Record<Role, string> = {
   designer: '/designer',
   marketing: '/marketing',
   finance: '/finance',
+  seo: '/seo',
   employee: '/profile',
   guest: '/profile',
 };
@@ -97,8 +103,18 @@ export function roleHome(role: string): string {
   return ROLE_HOME[role as Role] ?? '/profile';
 }
 
-/** Route prefix -> permission required to enter it. Checked by middleware and workspace layouts. */
+/**
+ * Route prefix -> permission required to enter it. Checked by middleware and
+ * workspace layouts. Order matters: permissionForPath returns the FIRST
+ * match, so the admin sub-routes must be listed before the general
+ * '/dashboard' entry or they'd only ever match the looser permission.
+ */
 export const ROUTE_PERMISSIONS: Array<{ prefix: string; permission: Permission }> = [
+  { prefix: '/dashboard/users', permission: 'admin.manage' },
+  { prefix: '/dashboard/roles', permission: 'admin.manage' },
+  { prefix: '/dashboard/permissions', permission: 'admin.manage' },
+  { prefix: '/dashboard/audit-logs', permission: 'admin.manage' },
+  { prefix: '/dashboard/reports', permission: 'admin.manage' },
   { prefix: '/dashboard', permission: 'workspace:enterprise' },
   { prefix: '/hr', permission: 'workspace:hr' },
   { prefix: '/qa', permission: 'workspace:qa' },
@@ -107,6 +123,7 @@ export const ROUTE_PERMISSIONS: Array<{ prefix: string; permission: Permission }
   { prefix: '/uiux-editor', permission: 'workspace:designer' },
   { prefix: '/marketing', permission: 'workspace:marketing' },
   { prefix: '/finance', permission: 'workspace:finance' },
+  { prefix: '/seo', permission: 'workspace:seo' },
 ];
 
 export function permissionForPath(pathname: string): Permission | null {

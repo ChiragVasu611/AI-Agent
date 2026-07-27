@@ -665,3 +665,121 @@ export interface QaDeviceInfo {
   battery: number | null;
   isStub: true;
 }
+
+export type SeoProjectType = 'website' | 'android' | 'ios' | 'flutter' | 'react_native' | 'hybrid' | 'web_app';
+
+export interface SeoProject {
+  id: string;
+  userId: string;
+  name: string;
+  companyName: string;
+  projectType: SeoProjectType;
+  websiteUrl: string | null;
+  playStoreUrl: string | null;
+  appStoreUrl: string | null;
+  targetCountry: string;
+  language: string;
+  businessCategory: string;
+  industry: string;
+  targetAudience: string;
+  competitorNames: string[];
+  focusKeywords: string[];
+  businessType: string | null;
+  productType: string | null;
+  userIntent: string | null;
+  targetMarket: string | null;
+  businessGoals: string[];
+  conversionGoals: string[];
+  businessSummary: string | null;
+  seoStrategy: string | null;
+  asoStrategy: string | null;
+  growthRoadmap: string | null;
+  analysisSource: 'ai' | 'deterministic' | null;
+  seoScore: number | null;
+  asoScore: number | null;
+  technicalScore: number | null;
+  contentScore: number | null;
+  accessibilityScore: number | null;
+  performanceScore: number | null;
+  metadataScore: number | null;
+  mobileScore: number | null;
+  uxScore: number | null;
+  lastAuditAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SeoAuditFinding {
+  category: string;
+  item: string;
+  status: 'pass' | 'fail' | 'warn';
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  detail: string;
+  recommendation: string;
+}
+
+export interface SeoAudit {
+  id: string;
+  projectId: string;
+  type: 'website' | 'aso';
+  target: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  errorMessage: string | null;
+  findings: SeoAuditFinding[];
+  counts: { critical: number; high: number; medium: number; low: number; passed: number };
+  scoreBreakdown: Record<string, unknown> | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export type SeoKeywordType = 'primary' | 'secondary' | 'long_tail' | 'semantic' | 'related' | 'question';
+
+export interface SeoKeyword {
+  id: string;
+  projectId: string;
+  keyword: string;
+  type: SeoKeywordType;
+  intent: 'informational' | 'navigational' | 'transactional' | 'commercial';
+  relevance: number;
+  competitionEstimate: 'low' | 'medium' | 'high';
+  businessValue: number;
+}
+
+export interface SeoTask {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  category: 'quick_win' | 'long_term' | 'technical' | 'content' | 'aso';
+  estimatedTime: string;
+  status: 'todo' | 'in_progress' | 'done';
+  assignedUserId: string | null;
+  completionPercent: number;
+  estimatedImpact: string | null;
+  planHorizon: 'weekly' | '30_day' | '90_day' | null;
+  createdAt: string;
+}
+
+export interface SeoContent {
+  id: string;
+  projectId: string;
+  type: string;
+  title: string;
+  body: string;
+  source: 'ai' | 'deterministic';
+  createdAt: string;
+}
+
+export interface SeoCompetitor {
+  id: string;
+  projectId: string;
+  name: string;
+  url: string | null;
+  missingOpportunities: string[];
+  improvementSuggestions: string[];
+  competitiveAdvantages: string[];
+  comparison: Record<string, unknown> | null;
+  status: 'queued' | 'completed' | 'failed';
+  createdAt: string;
+}

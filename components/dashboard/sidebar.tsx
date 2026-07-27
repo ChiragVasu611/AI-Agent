@@ -3,24 +3,18 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
-  Activity, BarChart3, Boxes, ClipboardList, CreditCard, FileClock, KeyRound, LayoutDashboard,
-  Settings, Shield, Sparkles, UserCog, Workflow,
+  ClipboardList, FileClock, KeyRound, LayoutDashboard,
+  Settings, Shield, UserCog, Workflow,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/components/providers/auth-provider';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { WORKSPACES } from '@/lib/workspaces/registry';
 
-const LIVE_WORKSPACE_KEYS = new Set(['app_factory', 'hr', 'designer']);
+const LIVE_WORKSPACE_KEYS = new Set(['app_factory', 'hr', 'designer', 'seo']);
 
 const NAV = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Analytics', href: '/dashboard/analytics', icon: BarChart3 },
-  { name: 'Projects', href: '/dashboard/projects', icon: Activity },
-  { name: 'Templates', href: '/dashboard/templates', icon: Boxes },
-  { name: 'Campaigns', href: '/dashboard/campaigns', icon: Sparkles },
-  { name: 'Integrations', href: '/dashboard/integrations', icon: Workflow },
-  { name: 'Credits', href: '/dashboard/credits', icon: CreditCard },
 ];
 
 const ADMIN_ITEMS = [
@@ -111,7 +105,6 @@ export function Sidebar() {
                   >
                     <item.icon className="h-4 w-4" />
                     <span className="flex-1">{item.name}</span>
-                    <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground">soon</span>
                   </Link>
                 );
               })}

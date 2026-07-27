@@ -1,6 +1,6 @@
 import {
-  BarChart3, Briefcase, Bug, Calendar, DollarSign, FileSearch, LayoutDashboard,
-  PlayCircle, ScrollText, Settings, Smartphone, Sparkles, TrendingUp, UserCheck, Users,
+  BarChart3, Briefcase, Bug, Calendar, CheckSquare, DollarSign, FileSearch, FileText, History, LayoutDashboard,
+  PlayCircle, ScrollText, Search, Settings, Smartphone, Sparkles, Target, TrendingUp, Trophy, UserCheck, Users,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -48,6 +48,7 @@ export const WORKSPACES: Record<string, WorkspaceConfig> = {
       { label: 'QA Dashboard', href: '/qa', icon: LayoutDashboard },
       { label: 'Test Execution', href: '/qa/test-execution', icon: PlayCircle },
       { label: 'AI Test Case Execution', href: '/qa/test-case-execution', icon: Sparkles },
+      { label: 'Test Runs', href: '/qa/runs', icon: History },
       { label: 'Execution Reports', href: '/qa/execution-reports', icon: ScrollText },
       { label: 'Analytics', href: '/qa/reports', icon: BarChart3 },
       { label: 'Devices', href: '/qa/devices', icon: Smartphone },
@@ -101,6 +102,22 @@ export const WORKSPACES: Record<string, WorkspaceConfig> = {
     navItems: [
       { label: 'UI/UX Designer', href: '/designer', icon: LayoutDashboard },
       { label: 'Settings', href: '/designer/settings', icon: Settings },
+    ],
+  },
+  seo: {
+    key: 'seo',
+    label: 'SEO & ASO',
+    subtitle: 'AI-driven SEO/ASO audits, keyword strategy, and growth planning — zero paid APIs.',
+    icon: Target,
+    homeHref: '/seo',
+    navItems: [
+      { label: 'SEO Dashboard', href: '/seo', icon: LayoutDashboard },
+      { label: 'Projects', href: '/seo/projects', icon: Briefcase },
+      { label: 'Keyword Engine', href: '/seo/keywords', icon: Search },
+      { label: 'Tasks', href: '/seo/tasks', icon: CheckSquare },
+      { label: 'Reports', href: '/seo/reports', icon: FileText },
+      { label: 'Growth Coach', href: '/seo/growth', icon: Trophy },
+      { label: 'Settings', href: '/seo/settings', icon: Settings },
     ],
   },
 };

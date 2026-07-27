@@ -3,7 +3,6 @@ import { ArrowRight, Bot, Boxes, Cpu, Layers, ShieldCheck, Sparkles, Workflow } 
 import { getCurrentUser } from '@/lib/auth/session';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { Project } from '@/lib/mongodb/models/Project';
-import { Credits } from '@/lib/mongodb/models/Credits';
 import { serializeDoc } from '@/lib/mongodb/serialize';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -70,21 +69,16 @@ export default async function DashboardHome() {
     .lean();
   const projects = projectDocs.map(serializeDoc);
 
-  const credits = user
-    ? await Credits.findOne({ userId: user.id }).lean<{ balance: number }>()
-    : null;
-
   const stats = [
     { label: 'Active Projects', value: projects.filter((p) => p.status !== 'completed' && p.status !== 'failed').length },
     { label: 'Completed Builds', value: projects.filter((p) => p.status === 'completed').length },
-    { label: 'Credits Balance', value: credits?.balance ?? 100 },
     { label: 'Agents Online', value: 16 },
   ];
 
   return (
     <div className="mx-auto max-w-7xl space-y-8 p-6 lg:p-8">
       {/* Stats */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-3">
         {stats.map((s) => (
           <Card key={s.label} className="relative overflow-hidden border-border bg-card/60 p-5 backdrop-blur">
             <div className="font-display text-3xl font-semibold">{s.value}</div>
@@ -129,9 +123,6 @@ export default async function DashboardHome() {
       <section>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="font-display text-xl font-semibold tracking-tight">Recent Projects</h2>
-          <Link href="/dashboard/projects" className="text-sm text-primary hover:underline">
-            View all
-          </Link>
         </div>
         <Card className="overflow-hidden border-border bg-card/60 backdrop-blur">
           {projects && projects.length > 0 ? (

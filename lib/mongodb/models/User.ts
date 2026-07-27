@@ -6,9 +6,10 @@ const userSchema = new Schema({
   fullName: { type: String, default: '' },
   role: {
     type: String,
-    enum: ['super_admin', 'company_admin', 'hr', 'qa', 'developer', 'designer', 'marketing', 'finance', 'employee', 'guest'],
+    enum: ['super_admin', 'company_admin', 'hr', 'qa', 'developer', 'designer', 'marketing', 'finance', 'seo', 'employee', 'guest'],
     default: 'employee',
   },
+  isActive: { type: Boolean, default: true },
   resetToken: { type: String, default: null },
   resetTokenExpires: { type: Date, default: null },
   qaOpenRouterApiKey: { type: String, default: null },
@@ -16,6 +17,20 @@ const userSchema = new Schema({
   uiuxAiEnabled: { type: Boolean, default: true },
   uiuxOpenRouterApiKey: { type: String, default: null },
   uiuxApiKeyTier: { type: String, enum: ['free', 'paid', null], default: null },
+  seoAiEnabled: { type: Boolean, default: true },
+  seoOpenRouterApiKey: { type: String, default: null },
+  seoApiKeyTier: { type: String, enum: ['free', 'paid', null], default: null },
+  seoSettings: {
+    defaultCountry: { type: String, default: 'United States' },
+    defaultLanguage: { type: String, default: 'English' },
+    defaultProjectType: { type: String, default: 'website' },
+    defaultReportFormat: { type: String, enum: ['pdf', 'excel', 'csv'], default: 'pdf' },
+    notifyOnAuditComplete: { type: Boolean, default: true },
+    notifyOnReportGenerated: { type: Boolean, default: true },
+    notifyOnCriticalIssue: { type: Boolean, default: true },
+    notifyOnOptimizationComplete: { type: Boolean, default: true },
+    notifyOnProjectUpdated: { type: Boolean, default: false },
+  },
 }, { timestamps: true });
 
 export type UserDoc = InferSchemaType<typeof userSchema>;
