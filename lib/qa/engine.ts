@@ -10,6 +10,7 @@ import { fallbackBug } from '@/lib/qa/bug-bank';
 import { placeholderScreenshot } from '@/lib/qa/screenshot';
 import { SIMULATED_DEVICE_NAMES } from '@/lib/qa/device-adapter';
 import { sleep, log } from '@/lib/qa/runtime-helpers';
+import { onRunCompleted } from '@/lib/issue-boards/sync';
 import type { QaBugType, QaSeverity } from '@/lib/types';
 
 const CASES_PER_MODULE = 3;
@@ -229,4 +230,5 @@ export async function runQaTestExecution(runId: string, apiKey: string | null) {
   await run.save();
 
   await log(runId, 'automation', 'info', `Run completed: ${run.status.toUpperCase()} — ${passedCases}/${totalCases} cases passed.`);
+  await onRunCompleted(runId);
 }

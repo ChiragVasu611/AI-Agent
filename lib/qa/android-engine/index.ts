@@ -3,6 +3,7 @@ import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { User } from '@/lib/mongodb/models/User';
 import { log } from '@/lib/qa/runtime-helpers';
+import { onRunCompleted } from '@/lib/issue-boards/sync';
 import { DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
 import { installApk, clearAppData } from '@/lib/qa/adb';
 import type { QaCredentials } from './login-handler';
@@ -103,6 +104,7 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
     run.currentStep = 'Failed';
     run.completedAt = new Date();
     await run.save();
+    await onRunCompleted(runId);
   };
 
   if (!apkPath) return fail('No APK binary was stored for this project — cannot install on the device.');
@@ -254,6 +256,7 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
     run.currentCase = null;
     run.completedAt = new Date();
     await run.save();
+    await onRunCompleted(runId);
   };
 
   run.currentStep = 'Exploring application';
@@ -509,6 +512,7 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
     `Run completed: ${run.status.toUpperCase()} — ${totals.passed}/${totals.total} checks passed, `
     + `${reporter.count} bug(s) [crit ${severityCounts.critical}, high ${severityCounts.high}, med ${severityCounts.medium}, low ${severityCounts.low}], `
     + `${screenshots.stats.captured} real screenshot(s), ${exploration.graph.size} screen(s) explored.`);
+  await onRunCompleted(runId);
 
   } catch (err) {
     // Any unexpected throw in the pipeline must still leave the run in a

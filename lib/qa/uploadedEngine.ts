@@ -9,6 +9,7 @@ import { generateQaAnalysis, parseJsonLoose } from '@/lib/qa/ai-provider';
 import { placeholderScreenshot } from '@/lib/qa/screenshot';
 import { SIMULATED_DEVICE_NAMES } from '@/lib/qa/device-adapter';
 import { sleep, log } from '@/lib/qa/runtime-helpers';
+import { onRunCompleted } from '@/lib/issue-boards/sync';
 import type { QaPriority, QaSeverity } from '@/lib/types';
 
 const STEP_DELAY_MS = 350;
@@ -249,4 +250,5 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
   await run.save();
 
   await log(runId, 'automation', 'info', `Run completed: ${run.status.toUpperCase()} — ${passed}/${total} passed, ${failed} failed, ${blocked} blocked, ${skipped} skipped.`);
+  await onRunCompleted(runId);
 }

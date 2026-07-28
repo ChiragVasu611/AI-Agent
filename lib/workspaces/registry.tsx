@@ -1,5 +1,5 @@
 import {
-  BarChart3, Briefcase, Bug, Calendar, CheckSquare, DollarSign, FileSearch, FileText, History, LayoutDashboard,
+  BarChart3, Briefcase, Bug, Calendar, CheckSquare, DollarSign, FileSearch, FileText, History, KanbanSquare, LayoutDashboard,
   PlayCircle, ScrollText, Search, Settings, Smartphone, Sparkles, Target, TrendingUp, Trophy, UserCheck, Users,
   type LucideIcon,
 } from 'lucide-react';
@@ -90,6 +90,7 @@ export const WORKSPACES: Record<string, WorkspaceConfig> = {
     homeHref: '/app-factory',
     navItems: [
       { label: 'App Factory', href: '/app-factory', icon: LayoutDashboard },
+      { label: 'AI Issue Boards', href: '/app-factory/issue-boards', icon: KanbanSquare },
       { label: 'Settings', href: '/app-factory/settings', icon: Settings },
     ],
   },
