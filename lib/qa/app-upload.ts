@@ -15,6 +15,7 @@ export const PLATFORM_BY_SOURCE: Record<QaSourceType, QaPlatform> = {
   hybrid: 'cross_platform',
   web_app: 'web',
   web_url: 'web',
+  installed_app: 'android',
 };
 
 export const BINARY_SOURCE_TYPES = new Set<QaSourceType>(['apk', 'aab', 'ipa']);

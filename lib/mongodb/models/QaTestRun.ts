@@ -34,6 +34,14 @@ const qaTestRunSchema = new Schema({
 
   performanceScore: { type: Number, default: null },
   errorMessage: { type: String, default: null },
+
+  /**
+   * Opt-in for `pm clear` before an installed-app run. Defaults to FALSE because
+   * wiping an app already on someone's device destroys their real data (logins,
+   * photos, downloads). Uploaded-APK runs always start fresh regardless, since a
+   * reinstall has no pre-existing user data worth preserving.
+   */
+  resetAppData: { type: Boolean, default: false },
 }, { timestamps: true });
 
 export const QaTestRun = models.QaTestRun ?? model('QaTestRun', qaTestRunSchema);

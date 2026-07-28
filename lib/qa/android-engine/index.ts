@@ -5,7 +5,7 @@ import { User } from '@/lib/mongodb/models/User';
 import { log } from '@/lib/qa/runtime-helpers';
 import { onRunCompleted } from '@/lib/issue-boards/sync';
 import { DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
-import { installApk, clearAppData } from '@/lib/qa/adb';
+import { installApk, clearAppData, isPackageInstalled } from '@/lib/qa/adb';
 import type { QaCredentials } from './login-handler';
 
 import { profileDevice, forceStop, startAppTimed } from './device';
@@ -107,8 +107,16 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
     await onRunCompleted(runId);
   };
 
-  if (!apkPath) return fail('No APK binary was stored for this project — cannot install on the device.');
-  if (!packageName) return fail('Could not determine the app package name from the APK — cannot launch it.');
+  // ATTACH MODE: an 'installed_app' project targets an app already present on
+  // the device, so there is no binary to install — the engine attaches to the
+  // installed package instead. Everything after launch is identical.
+  const attachMode = !apkPath && project.sourceType === 'installed_app';
+
+  if (!packageName) return fail('Could not determine the app package name — cannot launch it.');
+  if (!apkPath && !attachMode) return fail('No APK binary was stored for this project — cannot install on the device.');
+  if (attachMode && !(await isPackageInstalled(serial, packageName))) {
+    return fail(`"${packageName}" is not installed on ${profile.model} any more. Reload the installed-app list and start a new run.`);
+  }
 
   // Load QA credentials from the user record if present (best-effort, optional).
   let credentials: QaCredentials | null = null;
@@ -187,25 +195,39 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
     packageName,
   });
 
-  // ------------------------------------------------------------- INSTALL
-  run.currentStep = 'Installing APK on device';
-  run.progress = 4;
-  await run.save();
-  await emit('info', `Installing ${project.sourceFileName ?? 'app.apk'} …`);
-  const install = await installApk(serial, apkPath);
-  await emit(install.ok ? 'info' : 'error', `adb install: ${install.message.slice(0, 300)}`);
-  if (!install.ok) return fail(`Install failed: ${install.message.slice(0, 300)}`);
+  // ------------------------------------------------------- INSTALL / ATTACH
+  if (attachMode) {
+    run.currentStep = 'Attaching to installed app';
+    run.progress = 4;
+    await run.save();
+    await emit('info', `Attaching to installed app ${packageName} (no upload — the app is already on the device).`);
+  } else {
+    run.currentStep = 'Installing APK on device';
+    run.progress = 4;
+    await run.save();
+    await emit('info', `Installing ${project.sourceFileName ?? 'app.apk'} …`);
+    const install = await installApk(serial, apkPath as string);
+    await emit(install.ok ? 'info' : 'error', `adb install: ${install.message.slice(0, 300)}`);
+    if (!install.ok) return fail(`Install failed: ${install.message.slice(0, 300)}`);
+  }
 
-  // Always start from a FRESH app state. If the app was already installed, its
-  // data (session, completed onboarding, granted permissions, cached content)
-  // would otherwise carry over and the run would test an already-signed-in app
-  // instead of the real first-run experience.
+  // Fresh-state handling.
+  //  • Uploaded APK: always clear. A reinstall has no user data worth keeping,
+  //    and stale state would otherwise hide the real first-run experience.
+  //  • Installed app (attach mode): clear ONLY when the user explicitly opted
+  //    in, because `pm clear` permanently destroys that app's real data
+  //    (logins, photos, downloads) on someone's own device.
   await forceStop(serial, packageName);
-  const cleared = await clearAppData(serial, packageName);
-  await emit(cleared.ok ? 'info' : 'warn',
-    cleared.ok
-      ? 'Cleared existing app data — starting from a fresh install state.'
-      : `Could not clear app data (${cleared.message.slice(0, 120)}); continuing with existing state.`);
+  const wantsReset = attachMode ? Boolean(run.resetAppData) : true;
+  if (wantsReset) {
+    const cleared = await clearAppData(serial, packageName);
+    await emit(cleared.ok ? 'info' : 'warn',
+      cleared.ok
+        ? `Cleared app data for ${packageName} — starting from a fresh state.`
+        : `Could not clear app data (${cleared.message.slice(0, 120)}); continuing with existing state.`);
+  } else {
+    await emit('info', 'Keeping the app\'s existing data (reset not requested) — testing the app in its current state.');
+  }
 
   // ------------------------------------------------------------- BASELINE
   await crashes.start();

@@ -143,6 +143,65 @@ export async function installApk(serial: string, apkPath: string): Promise<{ ok:
   return { ok, message: out };
 }
 
+export interface InstalledApp {
+  packageName: string;
+  versionName: string | null;
+  versionCode: string | null;
+}
+
+/**
+ * Lists the third-party (user-installed) apps on a connected device so a run
+ * can target an app that is ALREADY on the phone instead of uploading an APK.
+ *
+ * `-3` excludes system packages, which keeps the list to apps a person would
+ * actually want to test. Versions are read per package from `dumpsys`; that is
+ * a handful of fast shell calls, and any package whose dump fails is still
+ * listed (without a version) rather than dropped.
+ *
+ * Human-readable labels and icons are deliberately NOT resolved here: the only
+ * way to get them is to pull the APK off the device, which is hundreds of MB
+ * and ~10s per app. The package name plus version is what identifies an app
+ * unambiguously for QA anyway.
+ */
+export async function listInstalledApps(serial: string): Promise<InstalledApp[]> {
+  const res = await runAdb(['-s', serial, 'shell', 'pm', 'list', 'packages', '-3'], 30_000);
+  if (!res.ok) return [];
+
+  const packages = res.stdout
+    .split('\n')
+    .map((l) => l.replace(/^package:/, '').trim())
+    .filter((l) => l.length > 0 && /^[A-Za-z][\w.]*$/.test(l))
+    .sort((a, b) => a.localeCompare(b));
+
+  // Resolve versions with bounded concurrency so a 50-app device stays snappy.
+  const out: InstalledApp[] = [];
+  const BATCH = 8;
+  for (let i = 0; i < packages.length; i += BATCH) {
+    const slice = packages.slice(i, i + BATCH);
+    const dumps = await Promise.all(
+      slice.map((pkg) =>
+        runAdb(['-s', serial, 'shell', 'dumpsys', 'package', pkg], 15_000)
+          .then((r) => (r.ok ? r.stdout : ''))
+          .catch(() => '')),
+    );
+    slice.forEach((packageName, idx) => {
+      const dump = dumps[idx] ?? '';
+      out.push({
+        packageName,
+        versionName: /versionName=(\S+)/.exec(dump)?.[1] ?? null,
+        versionCode: /versionCode=(\d+)/.exec(dump)?.[1] ?? null,
+      });
+    });
+  }
+  return out;
+}
+
+/** True when the package is currently installed on the device. */
+export async function isPackageInstalled(serial: string, packageName: string): Promise<boolean> {
+  const res = await runAdb(['-s', serial, 'shell', 'pm', 'path', packageName], 15_000);
+  return res.ok && /package:/.test(res.stdout);
+}
+
 /**
  * Wipes the app's data so an ALREADY-INSTALLED app starts from a clean slate:
  * no cached session, no completed onboarding, no prior state. Without this a

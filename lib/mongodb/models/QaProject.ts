@@ -5,7 +5,9 @@ const qaProjectSchema = new Schema({
   name: { type: String, required: true },
   sourceType: {
     type: String,
-    enum: ['apk', 'aab', 'ipa', 'flutter', 'react_native', 'hybrid', 'web_app', 'play_store_url', 'app_store_url', 'web_url'],
+    // 'installed_app' targets an app already present on a connected device, so
+    // it carries appPackageName but no uploaded binary (binaryPath stays null).
+    enum: ['apk', 'aab', 'ipa', 'flutter', 'react_native', 'hybrid', 'web_app', 'play_store_url', 'app_store_url', 'web_url', 'installed_app'],
     required: true,
   },
   sourceRef: { type: String, required: true }, // URL or uploaded file name

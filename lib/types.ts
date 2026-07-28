@@ -498,7 +498,9 @@ export interface Profile {
 
 export type QaSourceType =
   | 'apk' | 'aab' | 'ipa' | 'flutter' | 'react_native' | 'hybrid' | 'web_app'
-  | 'play_store_url' | 'app_store_url' | 'web_url';
+  | 'play_store_url' | 'app_store_url' | 'web_url'
+  /** An app already installed on a connected device — no binary is uploaded. */
+  | 'installed_app';
 
 export type QaPlatform = 'android' | 'ios' | 'web' | 'cross_platform';
 

@@ -10,6 +10,8 @@ import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
 import { runQaTestExecution } from '@/lib/qa/engine';
 import { runWebTestExecution } from '@/lib/qa/web-engine';
 import { runUploadedTestExecution } from '@/lib/qa/uploadedEngine';
+import { runAndroidDeviceExecution } from '@/lib/qa/android-engine';
+import { listDevices, isPackageInstalled } from '@/lib/qa/adb';
 import { parseTestCaseFile } from '@/lib/qa/testCaseParser';
 import { QaUploadedTestCase } from '@/lib/mongodb/models/QaUploadedTestCase';
 import { DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
@@ -70,6 +72,89 @@ export async function startTestExecution(formData: FormData) {
     ? runWebTestExecution(String(run._id))
     : runQaTestExecution(String(run._id), apiKey);
   execution.catch((e) => console.error('QA execution error', e));
+
+  revalidatePath('/qa');
+  revalidatePath('/qa/test-execution');
+  return { runId: String(run._id) };
+}
+
+/**
+ * Starts a real-device run against an app ALREADY INSTALLED on a connected
+ * device. Nothing is uploaded: the project records the package name and leaves
+ * `binaryPath` null, and the Android engine attaches to the installed package
+ * instead of installing one.
+ *
+ * `resetAppData` is opt-in and defaults to false — clearing data on an app that
+ * lives on someone's own device destroys their real logins/photos/downloads.
+ */
+export async function startInstalledAppExecution(formData: FormData) {
+  const user = await getCurrentUser();
+  if (!user) return { error: 'Not authenticated' };
+
+  const packageName = String(formData.get('packageName') ?? '').trim();
+  const requestedSerial = String(formData.get('deviceId') ?? '').trim();
+  const versionName = String(formData.get('appVersionName') ?? '').trim() || null;
+  const resetAppData = String(formData.get('resetAppData') ?? '') === 'on';
+  const modulesRaw = formData.getAll('modules').map(String);
+  const modules = modulesRaw.length > 0 ? modulesRaw : DEFAULT_SMOKE_MODULES;
+  const name = String(formData.get('name') ?? '').trim() || packageName;
+
+  if (!packageName || !/^[A-Za-z][\w.]*$/.test(packageName)) {
+    return { error: 'Select an installed app to test.' };
+  }
+
+  // The device must still be attached, and the serial must be one we can see —
+  // never pass an unvalidated string through to adb.
+  const online = (await listDevices()).filter((d) => d.status === 'online');
+  if (online.length === 0) {
+    return { error: 'No device is connected. Connect a device with USB debugging enabled and try again.' };
+  }
+  const target = requestedSerial ? online.find((d) => d.id === requestedSerial) : online[0];
+  if (!target) return { error: 'That device is no longer connected. Reload the device list and try again.' };
+
+  if (!(await isPackageInstalled(target.id, packageName))) {
+    return { error: `"${packageName}" is not installed on ${target.name}. Reload the installed apps list.` };
+  }
+
+  await connectToDatabase();
+
+  const project = await QaProject.create({
+    userId: user.id,
+    name,
+    sourceType: 'installed_app',
+    sourceRef: packageName,
+    platform: 'android',
+    appPackageName: packageName,
+    appVersionName: versionName,
+    // No binary is uploaded — the engine attaches to the installed package.
+    binaryPath: null,
+  });
+
+  const runNumber = await nextRunNumber(user.id);
+
+  const run = await QaTestRun.create({
+    userId: user.id,
+    projectId: project._id,
+    modules,
+    status: 'queued',
+    engineMode: 'real_device',
+    runNumber,
+    runName: `${name} Run #${runNumber}`,
+    buildVersion: versionName || '1.0.0',
+    executedByName: user.fullName || user.email,
+    resetAppData,
+  });
+
+  await ActivityLog.create({
+    userId: user.id,
+    action: 'qa.run.start',
+    entity: 'qa_test_run',
+    entityId: String(run._id),
+    meta: { name, modules, engine: 'real_device', source: 'installed_app', packageName, resetAppData },
+  });
+
+  runAndroidDeviceExecution(String(run._id), target.id)
+    .catch((e) => console.error('QA installed-app execution error', e));
 
   revalidatePath('/qa');
   revalidatePath('/qa/test-execution');

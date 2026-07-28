@@ -3,9 +3,9 @@
 import { useEffect, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Loader2, Play, Trash2, UploadCloud } from 'lucide-react';
+import { Loader2, Play, RefreshCw, Trash2, UploadCloud } from 'lucide-react';
 import { toast } from 'sonner';
-import { startTestExecution } from '@/app/qa/actions';
+import { startTestExecution, startInstalledAppExecution } from '@/app/qa/actions';
 import { submitBinaryRun } from '@/lib/qa/submit-binary-run';
 import { QA_MODULES, DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
 import { Button } from '@/components/ui/button';
@@ -20,18 +20,16 @@ import {
 
 const SOURCE_TYPES = [
   { value: 'apk', label: 'Android APK (.apk)' },
-  { value: 'aab', label: 'Android App Bundle (.aab)' },
+  { value: 'installed_app', label: 'Installed App (on connected device)' },
   { value: 'ipa', label: 'iOS IPA (.ipa)' },
   { value: 'flutter', label: 'Flutter App' },
-  { value: 'react_native', label: 'React Native App' },
-  { value: 'hybrid', label: 'Hybrid App' },
   { value: 'web_app', label: 'Web App' },
   { value: 'play_store_url', label: 'Play Store URL' },
   { value: 'app_store_url', label: 'App Store URL' },
   { value: 'web_url', label: 'Web URL' },
 ];
 
-const BINARY_EXTENSIONS: Record<string, string> = { apk: '.apk', aab: '.aab', ipa: '.ipa' };
+const BINARY_EXTENSIONS: Record<string, string> = { apk: '.apk', ipa: '.ipa' };
 
 export default function TestExecutionPage() {
   const router = useRouter();
@@ -43,9 +41,22 @@ export default function TestExecutionPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [devices, setDevices] = useState<any[]>([]);
   const [deviceId, setDeviceId] = useState('auto');
-  const isBinarySource = sourceType in BINARY_EXTENSIONS;
+  // Installed-app picker state.
+  const [installedApps, setInstalledApps] = useState<any[] | null>(null);
+  const [loadingApps, setLoadingApps] = useState(false);
+  const [selectedPackage, setSelectedPackage] = useState('');
+  const [appFilter, setAppFilter] = useState('');
+  const [resetAppData, setResetAppData] = useState(false);
+
+  const isInstalledAppSource = sourceType === 'installed_app';
+  // An uploaded APK and an installed-app selection are mutually exclusive: the
+  // upload control is only rendered when we are NOT in installed-app mode, and
+  // the picker only when we are — so neither can be active at the same time.
+  const isBinarySource = !isInstalledAppSource && sourceType in BINARY_EXTENSIONS;
   // Only a real .apk can be installed on a device via `adb install`.
   const supportsRealDevice = sourceType === 'apk';
+  const hasDevice = devices.length > 0;
+  const selectedApp = installedApps?.find((a) => a.packageName === selectedPackage) ?? null;
 
   async function onDeleteRun(e: React.MouseEvent, id: string) {
     e.preventDefault();
@@ -97,13 +108,53 @@ export default function TestExecutionPage() {
     setSelectedModules((prev) => (prev.includes(key) ? prev.filter((m) => m !== key) : [...prev, key]));
   }
 
+  /** Reads the user-installed apps off the selected (or first online) device. */
+  async function onLoadApps() {
+    setLoadingApps(true);
+    try {
+      const serial = deviceId !== 'auto' && deviceId !== 'simulated' ? deviceId : '';
+      const res = await fetch(`/api/qa/devices/apps${serial ? `?serial=${encodeURIComponent(serial)}` : ''}`);
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? 'Could not load installed apps.');
+        return;
+      }
+      setInstalledApps(data.apps ?? []);
+      if ((data.apps ?? []).length === 0) toast.info('No user-installed apps found on this device.');
+    } catch {
+      toast.error('Could not reach the device. Check that it is still connected.');
+    } finally {
+      setLoadingApps(false);
+    }
+  }
+
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     formData.set('sourceType', sourceType);
     selectedModules.forEach((m) => formData.append('modules', m));
-    if (supportsRealDevice) formData.set('deviceId', deviceId === 'auto' ? '' : deviceId);
+    if (supportsRealDevice || isInstalledAppSource) formData.set('deviceId', deviceId === 'auto' ? '' : deviceId);
     else formData.set('deviceId', 'simulated');
+
+    // Installed app: no upload, so this goes to its own action which attaches to
+    // the package already on the device.
+    if (isInstalledAppSource) {
+      if (!selectedPackage) {
+        toast.error('Click "Load Apps" and select an installed app to test.');
+        return;
+      }
+      formData.set('packageName', selectedPackage);
+      formData.set('appVersionName', selectedApp?.versionName ?? '');
+      if (resetAppData) formData.set('resetAppData', 'on');
+      else formData.delete('resetAppData');
+      startTransition(async () => {
+        const res = await startInstalledAppExecution(formData);
+        if (res?.error) { toast.error(res.error); return; }
+        toast.success('Test execution started');
+        router.push(`/qa/runs/${res.runId}`);
+      });
+      return;
+    }
 
     startTransition(async () => {
       // Binary APK/AAB/IPA uploads go through a Route Handler instead of this
@@ -148,12 +199,116 @@ export default function TestExecutionPage() {
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="buildVersion">Build Version</Label>
-            <Input id="buildVersion" name="buildVersion" placeholder="1.0.0" defaultValue="1.0.0" />
-          </div>
+          {isInstalledAppSource ? (
+            /* Installed-app picker. Rendered INSTEAD of the upload control, so an
+               uploaded APK and an installed-app selection can never both apply. */
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="deviceId">Device</Label>
+                <Select
+                  value={deviceId}
+                  onValueChange={(v) => { setDeviceId(v); setInstalledApps(null); setSelectedPackage(''); }}
+                >
+                  <SelectTrigger id="deviceId"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto — first connected device{devices.length ? ` (${devices.length} online)` : ''}</SelectItem>
+                    {devices.map((d) => (
+                      <SelectItem key={d.id} value={d.id}>{d.name} · {d.osVersion}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
-          {isBinarySource ? (
+              <div className="flex items-center gap-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="gap-2"
+                  disabled={!hasDevice || loadingApps}
+                  onClick={onLoadApps}
+                >
+                  {loadingApps ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  {installedApps ? 'Reload Apps' : 'Load Apps'}
+                </Button>
+                {installedApps && (
+                  <span className="text-xs text-muted-foreground">{installedApps.length} app(s) found</span>
+                )}
+              </div>
+
+              {!hasDevice && (
+                <p className="text-xs text-amber-500">
+                  Connect a device with USB debugging enabled to load its installed apps.
+                </p>
+              )}
+
+              {installedApps && installedApps.length > 0 && (
+                <div className="space-y-2">
+                  <Input
+                    placeholder="Filter apps…"
+                    value={appFilter}
+                    onChange={(e) => setAppFilter(e.target.value)}
+                  />
+                  <div className="max-h-64 space-y-1 overflow-y-auto rounded-lg border border-border p-1.5">
+                    {installedApps
+                      .filter((a) => a.packageName.toLowerCase().includes(appFilter.toLowerCase()))
+                      .map((a) => (
+                        <label
+                          key={a.packageName}
+                          className={`flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-xs transition hover:bg-secondary/50 ${
+                            selectedPackage === a.packageName ? 'bg-primary/10 ring-1 ring-primary/30' : ''
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="installedApp"
+                            className="h-3.5 w-3.5 accent-primary"
+                            checked={selectedPackage === a.packageName}
+                            onChange={() => setSelectedPackage(a.packageName)}
+                          />
+                          <span className="min-w-0 flex-1 truncate font-mono" title={a.packageName}>{a.packageName}</span>
+                          {a.versionName && (
+                            <Badge variant="secondary" className="shrink-0 text-[10px]">v{a.versionName}</Badge>
+                          )}
+                        </label>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedPackage && (
+                <div className="space-y-2 rounded-lg border border-border bg-secondary/20 p-3">
+                  <p className="text-xs">
+                    Testing installed app <span className="font-mono font-medium">{selectedPackage}</span>
+                    {selectedApp?.versionName ? ` (v${selectedApp.versionName})` : ''}. No APK upload is needed —
+                    remove the selection to upload a binary instead.
+                  </p>
+                  <label className="flex items-start gap-2 text-xs">
+                    <Checkbox
+                      checked={resetAppData}
+                      onCheckedChange={(v) => setResetAppData(v === true)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="font-medium">Reset app data before testing</span>
+                      <span className="block text-[11px] text-destructive">
+                        Warning: permanently deletes this app&apos;s existing data on the device (sign-ins, photos,
+                        downloads) and revokes its permissions. Leave unchecked to test the app in its current state.
+                      </span>
+                    </span>
+                  </label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => setSelectedPackage('')}
+                  >
+                    Clear selection
+                  </Button>
+                </div>
+              )}
+            </div>
+          ) : isBinarySource ? (
             <div className="space-y-1.5">
               <Label htmlFor="appFile">Upload {BINARY_EXTENSIONS[sourceType]} file *</Label>
               <label
