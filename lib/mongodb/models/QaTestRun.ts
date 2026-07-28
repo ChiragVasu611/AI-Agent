@@ -7,7 +7,7 @@ const qaTestRunSchema = new Schema({
   status: { type: String, enum: ['queued', 'running', 'passed', 'failed', 'partial', 'cancelled'], default: 'queued', index: true },
   progress: { type: Number, default: 0 },
   sourceMode: { type: String, enum: ['catalog', 'uploaded'], default: 'catalog' },
-  engineMode: { type: String, enum: ['real_browser', 'simulated'], default: 'simulated' },
+  engineMode: { type: String, enum: ['real_browser', 'real_device', 'simulated'], default: 'simulated' },
 
   runNumber: { type: Number, required: true, index: true },
   runName: { type: String, default: '' },

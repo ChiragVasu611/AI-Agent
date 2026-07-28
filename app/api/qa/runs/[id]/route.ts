@@ -8,6 +8,7 @@ import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
 import { QaLogEntry } from '@/lib/mongodb/models/QaLogEntry';
 import { QaBug } from '@/lib/mongodb/models/QaBug';
 import { serializeDoc } from '@/lib/mongodb/serialize';
+import { reconcileStaleRuns } from '@/lib/qa/reconcile-runs';
 
 export const runtime = 'nodejs';
 
@@ -16,6 +17,9 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
   if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
 
   await connectToDatabase();
+  // Self-heal zombie runs whose background worker died so the client stops
+  // polling a run that can never finish (the "stuck at 96%" case).
+  await reconcileStaleRuns(user.id);
   const doc = await QaTestRun.findOne({ _id: params.id, userId: user.id }).lean();
   if (!doc) return NextResponse.json({ run: null }, { status: 404 });
 

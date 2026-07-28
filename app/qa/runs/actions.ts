@@ -88,6 +88,37 @@ export async function rerunQaTestRun(runId: string) {
   return { ok: true, runId: String(newRun._id) };
 }
 
+/**
+ * Requests cancellation of an in-flight run. Flips the status to 'cancelled';
+ * the real-device engine polls this cooperatively and stops promptly, saving
+ * whatever partial results it has already collected. Only running/queued runs
+ * can be cancelled, and only by their owner.
+ */
+export async function cancelQaTestRun(runId: string) {
+  const user = await getCurrentUser();
+  if (!user) return { error: 'Not authenticated' };
+
+  await connectToDatabase();
+
+  const run = await QaTestRun.findOne({ _id: runId, userId: user.id });
+  if (!run) return { error: 'Run not found.' };
+  if (run.status !== 'running' && run.status !== 'queued') {
+    return { error: `Run is already ${run.status}.` };
+  }
+
+  run.status = 'cancelled';
+  run.currentStep = 'Cancelling…';
+  await run.save();
+
+  await ActivityLog.create({
+    userId: user.id, action: 'qa.run.cancel', entity: 'qa_test_run', entityId: runId, meta: { runNumber: run.runNumber },
+  });
+
+  revalidatePath(`/qa/runs/${runId}`);
+  revalidatePath('/qa/runs');
+  return { ok: true };
+}
+
 export async function deleteQaTestRun(runId: string) {
   const user = await getCurrentUser();
   if (!user) return { error: 'Not authenticated' };

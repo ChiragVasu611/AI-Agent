@@ -8,9 +8,11 @@ import { User } from '@/lib/mongodb/models/User';
 import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
 import { runQaTestExecution } from '@/lib/qa/engine';
 import { runUploadedTestExecution } from '@/lib/qa/uploadedEngine';
+import { runAndroidDeviceExecution } from '@/lib/qa/android-engine';
 import { parseTestCaseFile } from '@/lib/qa/testCaseParser';
 import { DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
 import { PLATFORM_BY_SOURCE, BINARY_SOURCE_TYPES, handleAppFileUpload } from '@/lib/qa/app-upload';
+import { firstOnlineDevice, listDevices } from '@/lib/qa/adb';
 import { nextRunNumber } from '@/lib/qa/run-number';
 import type { QaSourceType } from '@/lib/types';
 
@@ -23,39 +25,71 @@ import type { QaSourceType } from '@/lib/types';
  * store links, etc.) are unaffected and continue through the original
  * startTestExecution/startUploadedTestExecution server actions.
  */
+export const runtime = 'nodejs';
+export const maxDuration = 60;
+
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
 
-  const formData = await req.formData();
+  let formData: FormData;
+  try {
+    formData = await req.formData();
+  } catch (e) {
+    console.error('QA start-binary: failed to parse multipart body', e);
+    return NextResponse.json(
+      { error: 'Could not read the uploaded file. It may be too large or the upload was interrupted.' },
+      { status: 400 },
+    );
+  }
+
   const mode = String(formData.get('mode') ?? 'catalog');
   const sourceType = String(formData.get('sourceType') ?? '') as QaSourceType;
   const buildVersion = String(formData.get('buildVersion') ?? '').trim() || '1.0.0';
 
   if (!sourceType || !BINARY_SOURCE_TYPES.has(sourceType)) {
-    return NextResponse.json({ error: 'This endpoint only accepts APK, AAB, or IPA uploads.' }, { status: 400 });
+    return NextResponse.json({ error: `This endpoint only accepts APK, AAB, or IPA uploads (received sourceType="${sourceType || 'none'}").` }, { status: 400 });
   }
 
   const upload = await handleAppFileUpload(sourceType, formData);
-  if (!upload.ok) return NextResponse.json({ error: upload.error }, { status: 400 });
+  if (!upload.ok) {
+    return NextResponse.json({ error: upload.error }, { status: 400 });
+  }
 
   const name = String(formData.get('name') ?? '').trim() || upload.appInfo.appDisplayName || upload.sourceRef;
 
-  await connectToDatabase();
+  let project;
+  let runNumber: number;
+  let apiKey: string | null;
+  try {
+    await connectToDatabase();
 
-  const project = await QaProject.create({
-    userId: user.id,
-    name,
-    sourceType,
-    sourceRef: upload.sourceRef,
-    platform: PLATFORM_BY_SOURCE[sourceType],
-    ...upload.appInfo,
-  });
+    project = await QaProject.create({
+      userId: user.id,
+      name,
+      sourceType,
+      sourceRef: upload.sourceRef,
+      platform: PLATFORM_BY_SOURCE[sourceType],
+      binaryPath: upload.binaryPath,
+      ...upload.appInfo,
+    });
 
-  const runNumber = await nextRunNumber(user.id);
+    runNumber = await nextRunNumber(user.id);
 
-  const dbUser = await User.findById(user.id).lean<{ qaOpenRouterApiKey: string | null }>();
-  const apiKey = dbUser?.qaOpenRouterApiKey ?? null;
+    const dbUser = await User.findById(user.id).lean<{ qaOpenRouterApiKey: string | null }>();
+    apiKey = dbUser?.qaOpenRouterApiKey ?? null;
+  } catch (e) {
+    console.error('QA start-binary: database error while creating project/run', e);
+    try {
+      const { appendFileSync } = await import('fs');
+      const { join } = await import('path');
+      appendFileSync(join(process.cwd(), 'qa-upload-debug.log'), `[${new Date().toISOString()}] DB error: ${(e as Error)?.message}\n${(e as Error)?.stack ?? ''}\n\n`);
+    } catch { /* ignore */ }
+    return NextResponse.json(
+      { error: `Could not save the run to the database: ${(e as Error)?.message ?? 'unknown error'}` },
+      { status: 500 },
+    );
+  }
 
   if (mode === 'uploaded') {
     const testCaseFile = formData.get('testCaseFile') as File | null;
@@ -103,11 +137,32 @@ export async function POST(req: Request) {
   const modulesRaw = formData.getAll('modules').map(String);
   const modules = modulesRaw.length > 0 ? modulesRaw : DEFAULT_SMOKE_MODULES;
 
+  // Decide whether this run can execute on a REAL connected Android device.
+  // Only a genuine .apk can be installed directly via `adb install` (an .aab
+  // needs bundletool), so real-device execution is limited to APKs with a
+  // stored binary and at least one online device.
+  const requestedDeviceId = String(formData.get('deviceId') ?? '').trim();
+  let targetSerial: string | null = null;
+  if (sourceType === 'apk' && upload.binaryPath) {
+    try {
+      if (requestedDeviceId && requestedDeviceId !== 'simulated') {
+        const online = (await listDevices()).find((d) => d.id === requestedDeviceId && d.status === 'online');
+        targetSerial = online?.id ?? null;
+      } else if (requestedDeviceId !== 'simulated') {
+        const online = await firstOnlineDevice();
+        targetSerial = online?.id ?? null;
+      }
+    } catch (e) {
+      console.error('QA start-binary: device lookup failed, falling back to simulated', e);
+    }
+  }
+
   const run = await QaTestRun.create({
     userId: user.id,
     projectId: project._id,
     modules,
     status: 'queued',
+    engineMode: targetSerial ? 'real_device' : 'simulated',
     runNumber,
     runName: `${name} Run #${runNumber}`,
     buildVersion,
@@ -115,12 +170,16 @@ export async function POST(req: Request) {
   });
 
   await ActivityLog.create({
-    userId: user.id, action: 'qa.run.start', entity: 'qa_test_run', entityId: String(run._id), meta: { name, modules },
+    userId: user.id, action: 'qa.run.start', entity: 'qa_test_run', entityId: String(run._id), meta: { name, modules, engine: targetSerial ? 'real_device' : 'simulated' },
   });
 
-  // There's no real device farm for mobile/store sources, so binary uploads always
-  // run on the honestly-labeled simulated engine (never the real-browser engine).
-  runQaTestExecution(String(run._id), apiKey).catch((e) => console.error('QA execution error', e));
+  if (targetSerial) {
+    // Real device: install + launch + capture genuine screenshots + logcat crash scan.
+    runAndroidDeviceExecution(String(run._id), targetSerial).catch((e) => console.error('QA real-device execution error', e));
+  } else {
+    // No connected device (or non-APK) — fall back to the simulated engine.
+    runQaTestExecution(String(run._id), apiKey).catch((e) => console.error('QA execution error', e));
+  }
 
-  return NextResponse.json({ runId: String(run._id) });
+  return NextResponse.json({ runId: String(run._id), engine: targetSerial ? 'real_device' : 'simulated' });
 }

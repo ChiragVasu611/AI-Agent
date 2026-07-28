@@ -11,7 +11,7 @@ import { useAuth } from '@/components/providers/auth-provider';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { WORKSPACES } from '@/lib/workspaces/registry';
 
-const LIVE_WORKSPACE_KEYS = new Set(['app_factory', 'hr', 'designer', 'seo']);
+const LIVE_WORKSPACE_KEYS = new Set(['app_factory', 'hr', 'designer', 'seo' , 'qa']);
 
 const NAV = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },

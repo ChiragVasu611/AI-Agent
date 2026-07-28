@@ -1,12 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useEffect, useState, useTransition } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { toast } from 'sonner';
 import {
   ArrowLeft, Battery, Bug as BugIcon, Clock, Cpu,
-  CheckCircle2, XCircle, ShieldAlert, SkipForward, Hourglass, Globe, Gauge, MemoryStick, Signal,
+  CheckCircle2, XCircle, ShieldAlert, SkipForward, Hourglass, Globe, Gauge, MemoryStick, Signal, Smartphone, Loader2, Trash2, Square,
 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { deleteQaTestRun, cancelQaTestRun } from '@/app/qa/runs/actions';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -48,7 +51,10 @@ const STATUS_COLOR: Record<string, string> = {
 
 export default function QaRunPage() {
   const params = useParams();
+  const router = useRouter();
   const runId = params.id as string;
+  const [deleting, startDelete] = useTransition();
+  const [cancelling, startCancel] = useTransition();
   const [run, setRun] = useState<any>(null);
   const [logs, setLogs] = useState<any[]>([]);
   const [screenshots, setScreenshots] = useState<any[]>([]);
@@ -58,24 +64,42 @@ export default function QaRunPage() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    // Self-scheduling poll: the next cycle is queued only AFTER the current one
+    // resolves, so batches never overlap and pile up (which was exhausting the
+    // browser's connection/memory pool → ERR_INSUFFICIENT_RESOURCES). Polling
+    // stops once the run reaches a terminal state and backs off on error.
     async function load() {
-      const [runRes, logsRes, shotsRes, bugsRes, tcRes] = await Promise.all([
-        fetch(`/api/qa/runs/${runId}`).then((r) => r.json()),
-        fetch(`/api/qa/logs?runId=${runId}`).then((r) => r.json()),
-        fetch(`/api/qa/screenshots?runId=${runId}`).then((r) => r.json()),
-        fetch(`/api/qa/bugs?runId=${runId}`).then((r) => r.json()),
-        fetch(`/api/qa/test-cases?runId=${runId}`).then((r) => r.json()),
-      ]);
-      if (cancelled) return;
-      setRun(runRes.run);
-      setLogs(logsRes.logs ?? []);
-      setScreenshots(shotsRes.screenshots ?? []);
-      setBugs(bugsRes.bugs ?? []);
-      setTestCases(tcRes.testCases ?? []);
+      let live = false;
+      try {
+        const [runRes, logsRes, shotsRes, bugsRes, tcRes] = await Promise.all([
+          fetch(`/api/qa/runs/${runId}`).then((r) => r.json()),
+          fetch(`/api/qa/logs?runId=${runId}`).then((r) => r.json()),
+          fetch(`/api/qa/screenshots?runId=${runId}`).then((r) => r.json()),
+          fetch(`/api/qa/bugs?runId=${runId}`).then((r) => r.json()),
+          fetch(`/api/qa/test-cases?runId=${runId}`).then((r) => r.json()),
+        ]);
+        if (cancelled) return;
+        setRun(runRes.run);
+        setLogs(logsRes.logs ?? []);
+        setScreenshots(shotsRes.screenshots ?? []);
+        setBugs(bugsRes.bugs ?? []);
+        setTestCases(tcRes.testCases ?? []);
+        const status = runRes.run?.status;
+        live = status === 'running' || status === 'queued';
+        // Nothing to keep polling for once the run is finished (or gone).
+        if (!runRes.run || !live) return;
+        timer = setTimeout(load, 1500);
+      } catch {
+        // A poll can fail because the run was just deleted, the page is
+        // navigating away, or a transient network hiccup. Don't surface it as
+        // an unhandled error; back off and retry (unless we're unmounting).
+        if (!cancelled) timer = setTimeout(load, 3000);
+      }
     }
     load();
-    const interval = setInterval(load, 1500);
-    return () => { cancelled = true; clearInterval(interval); };
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [runId]);
 
   if (!run) {
@@ -84,7 +108,24 @@ export default function QaRunPage() {
 
   const isLive = run.status === 'running' || run.status === 'queued';
 
-<<<<<<< Updated upstream
+  function onDelete() {
+    if (!confirm(`Delete Run #${run.runNumber}? This removes its bugs, logs, screenshots, and test case results. This cannot be undone.`)) return;
+    startDelete(async () => {
+      const res = await deleteQaTestRun(runId);
+      if (res?.error) toast.error(res.error);
+      else { toast.success('Test run deleted'); router.push('/qa/runs'); }
+    });
+  }
+
+  function onStop() {
+    if (!confirm(`Stop Run #${run.runNumber}? The run will end now and any partial results collected so far are saved.`)) return;
+    startCancel(async () => {
+      const res = await cancelQaTestRun(runId);
+      if (res?.error) toast.error(res.error);
+      else toast.success('Stopping run…');
+    });
+  }
+
   const bugsByCategory = new Map<string, any[]>();
   BUG_CATEGORIES.forEach((c) => bugsByCategory.set(c, []));
   bugs.forEach((b) => { if (bugsByCategory.has(b.type)) bugsByCategory.get(b.type)!.push(b); });
@@ -107,7 +148,7 @@ export default function QaRunPage() {
     for (let i = 1; i < times.length; i++) diffs.push((times[i] - times[i - 1]) / 1000);
     return diffs.reduce((a, b) => a + b, 0) / diffs.length;
   })();
-=======
+
   // The simulation view adapts to the type of testing being executed:
   // web/browser tests show a landscape browser frame (full page, no crop),
   // mobile tests show a portrait phone frame.
@@ -116,8 +157,9 @@ export default function QaRunPage() {
     || ['web_app', 'web_url', 'web'].includes(testTarget)
     || run.project?.platform === 'web';
   const isIOS = ['ipa', 'app_store_url'].includes(testTarget);
+  const isRealDevice = run.engineMode === 'real_device';
+  const isRealEngine = run.engineMode === 'real_browser' || run.engineMode === 'real_device';
   const latestShot = screenshots.length > 0 ? screenshots[screenshots.length - 1] : null;
->>>>>>> Stashed changes
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6 lg:p-8">
@@ -130,7 +172,30 @@ export default function QaRunPage() {
           <p className="text-xs text-muted-foreground">RUN-{run.runNumber} · {run.modules?.length ?? 0} module(s) · {run.project?.sourceType}</p>
         </div>
         {run.engineMode === 'real_browser' && <Badge variant="outline" className="text-[10px]">Real Browser Execution</Badge>}
+        {isRealDevice && <Badge variant="outline" className="text-[10px]">Real Device Execution</Badge>}
         <Badge className={STATUS_COLOR[run.status]}>{run.status}</Badge>
+        {isLive && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
+            disabled={cancelling}
+            onClick={onStop}
+          >
+            {cancelling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+            Stop
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1.5 text-destructive hover:text-destructive"
+          disabled={deleting}
+          onClick={onDelete}
+        >
+          {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+          Delete
+        </Button>
       </div>
 
       {/* Execution Summary + Device Information — unchanged from the original run monitor. */}
@@ -167,15 +232,11 @@ export default function QaRunPage() {
           )}
         </Card>
 
-<<<<<<< Updated upstream
-        {/* Device Information */}
-=======
         {/* Live Device/Browser Preview — adapts to the type of testing */}
->>>>>>> Stashed changes
         <Card className="border-border bg-card/60 p-5 backdrop-blur">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="font-display text-sm font-semibold">{isBrowser ? 'Live Browser Preview' : 'Live Device Preview'}</h2>
-            <Badge variant="secondary" className="text-[10px]">{run.engineMode === 'real_browser' ? 'Real' : 'Simulated'}</Badge>
+            <Badge variant="secondary" className="text-[10px]">{isRealEngine ? 'Real' : 'Simulated'}</Badge>
           </div>
 
           {isBrowser ? (
@@ -214,12 +275,6 @@ export default function QaRunPage() {
             </>
           ) : (
             <>
-<<<<<<< Updated upstream
-              <div className="grid aspect-[9/16] max-h-64 place-items-center overflow-hidden rounded-xl border border-dashed border-border bg-secondary/20">
-                {screenshots.length > 0 ? (
-                  <img src={screenshots[screenshots.length - 1].imageDataUrl} alt="Current screen" className="h-full w-full object-cover object-top" />
-                ) : <Battery className="h-10 w-10 text-muted-foreground" />}
-=======
               {/* Portrait phone frame — screenshot shown with object-contain (no cropping) */}
               <div className="mx-auto w-fit rounded-[1.75rem] border-[6px] border-neutral-800 bg-black p-1 shadow-lg">
                 <div className="relative grid aspect-[9/16] max-h-72 w-40 place-items-center overflow-hidden rounded-[1.25rem] bg-secondary/20">
@@ -230,7 +285,6 @@ export default function QaRunPage() {
                     <Smartphone className="h-10 w-10 text-muted-foreground" />
                   )}
                 </div>
->>>>>>> Stashed changes
               </div>
               <div className="mt-3 space-y-1.5 text-xs">
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Platform</span><span>{isIOS ? 'iOS' : 'Android'}</span></div>
@@ -244,9 +298,13 @@ export default function QaRunPage() {
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Status</span><span>{isLive ? 'Online' : 'Offline'}</span></div>
               </div>
               <p className="mt-3 text-[11px] text-muted-foreground">
-                {latestShot
-                  ? 'Latest captured device screenshot — shown complete, not cropped.'
-                  : 'No device farm connected — this panel reflects the simulated run state.'}
+                {isRealDevice
+                  ? (latestShot
+                    ? 'Live screenshot captured from the real connected device via ADB.'
+                    : 'Installing and launching the app on the connected device…')
+                  : (latestShot
+                    ? 'Latest captured device screenshot — shown complete, not cropped.'
+                    : 'No device farm connected — this panel reflects the simulated run state.')}
               </p>
             </>
           )}

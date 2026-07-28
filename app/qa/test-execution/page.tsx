@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { Loader2, Play, Trash2, UploadCloud } from 'lucide-react';
 import { toast } from 'sonner';
 import { startTestExecution } from '@/app/qa/actions';
+import { submitBinaryRun } from '@/lib/qa/submit-binary-run';
 import { QA_MODULES, DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -40,7 +41,11 @@ export default function TestExecutionPage() {
   const [runs, setRuns] = useState<any[]>([]);
   const [appFileName, setAppFileName] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [devices, setDevices] = useState<any[]>([]);
+  const [deviceId, setDeviceId] = useState('auto');
   const isBinarySource = sourceType in BINARY_EXTENSIONS;
+  // Only a real .apk can be installed on a device via `adb install`.
+  const supportsRealDevice = sourceType === 'apk';
 
   async function onDeleteRun(e: React.MouseEvent, id: string) {
     e.preventDefault();
@@ -73,6 +78,21 @@ export default function TestExecutionPage() {
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
+  // Poll connected devices so an APK can be targeted at a real phone.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadDevices() {
+      try {
+        const res = await fetch('/api/qa/devices');
+        const data = await res.json();
+        if (!cancelled) setDevices((data.devices ?? []).filter((d: any) => d.status === 'online'));
+      } catch { /* ignore */ }
+    }
+    loadDevices();
+    const interval = setInterval(loadDevices, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
   function toggleModule(key: string) {
     setSelectedModules((prev) => (prev.includes(key) ? prev.filter((m) => m !== key) : [...prev, key]));
   }
@@ -82,13 +102,15 @@ export default function TestExecutionPage() {
     const formData = new FormData(e.currentTarget);
     formData.set('sourceType', sourceType);
     selectedModules.forEach((m) => formData.append('modules', m));
+    if (supportsRealDevice) formData.set('deviceId', deviceId === 'auto' ? '' : deviceId);
+    else formData.set('deviceId', 'simulated');
 
     startTransition(async () => {
       // Binary APK/AAB/IPA uploads go through a Route Handler instead of this
       // server action, since server actions in this Next.js version cap request
       // bodies at 1MB — far too small for a real app binary.
       const res = isBinarySource
-        ? await fetch('/api/qa/runs/start-binary', { method: 'POST', body: formData }).then((r) => r.json())
+        ? await submitBinaryRun(formData)
         : await startTestExecution(formData);
       if (res?.error) {
         toast.error(res.error);
@@ -157,6 +179,27 @@ export default function TestExecutionPage() {
               <p className="text-xs text-muted-foreground">
                 Real package/bundle ID, display name, and version are extracted automatically from the uploaded binary.
               </p>
+
+              {supportsRealDevice && (
+                <div className="mt-2 space-y-1.5">
+                  <Label htmlFor="deviceId">Run on device</Label>
+                  <Select value={deviceId} onValueChange={setDeviceId}>
+                    <SelectTrigger id="deviceId"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Auto — first connected device{devices.length ? ` (${devices.length} online)` : ''}</SelectItem>
+                      {devices.map((d) => (
+                        <SelectItem key={d.id} value={d.id}>{d.name} · {d.osVersion}</SelectItem>
+                      ))}
+                      <SelectItem value="simulated">Simulated (no real device)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {devices.length > 0
+                      ? 'The APK will be installed and launched on the real device — screenshots and crash logs are captured live.'
+                      : 'No device connected. The run will use the simulated engine. Connect a device in the Devices page for a real run.'}
+                  </p>
+                </div>
+              )}
             </div>
           ) : (
             <div className="space-y-1.5">

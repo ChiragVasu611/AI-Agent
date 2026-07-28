@@ -23,7 +23,7 @@ const MODULES = [
     href: '/qa',
     icon: ShieldCheck,
     accent: 'from-emerald-500/20 to-green-500/5',
-    status: 'soon' as const,
+    status: 'live' as const,
   },
   {
     name: 'HR Workspace',

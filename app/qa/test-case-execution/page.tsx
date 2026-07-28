@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { startUploadedTestExecution } from '@/app/qa/actions';
+import { submitBinaryRun } from '@/lib/qa/submit-binary-run';
 import { exportCsv, exportExcel } from '@/lib/qa/export';
 import { parseSheetPreview, type SheetPreview } from '@/lib/qa/sheet-preview';
 import { Button } from '@/components/ui/button';
@@ -340,14 +341,14 @@ export default function TestCaseExecutionPage() {
       // server action, since server actions in this Next.js version cap request
       // bodies at 1MB — far too small for a real app binary.
       const res = isBinarySource
-        ? await fetch('/api/qa/runs/start-binary', { method: 'POST', body: formData }).then((r) => r.json())
+        ? await submitBinaryRun(formData)
         : await startUploadedTestExecution(formData);
       if (res?.error) {
         toast.error(res.error);
         return;
       }
       toast.success('AI test case execution started');
-      setRunId(res.runId);
+      setRunId(res.runId ?? null);
     });
   }
 

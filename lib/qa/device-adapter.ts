@@ -1,23 +1,26 @@
 import type { QaDeviceInfo } from '@/lib/types';
+import { adbAvailable, listDevices as adbListDevices } from '@/lib/qa/adb';
 
 /**
- * Device integration adapter interface. No real device farm (ADB, BrowserStack,
- * AWS Device Farm, Xcode simulators, etc.) is connected in this environment —
- * this stub is the seam where that integration plugs in later without
- * touching any UI or execution-engine code above it.
+ * Device integration adapter interface. The active implementation is
+ * AdbDeviceAdapter, which talks to a real Android Debug Bridge on the host
+ * (see lib/qa/adb.ts). The interface remains the seam where other backends
+ * (BrowserStack, AWS Device Farm, Xcode simulators) could plug in later.
  */
 export interface DeviceAdapter {
   listDevices(): Promise<QaDeviceInfo[]>;
-  isConfigured(): boolean;
+  isConfigured(): Promise<boolean>;
 }
 
-class StubDeviceAdapter implements DeviceAdapter {
-  isConfigured() {
-    return false;
+/** Real Android devices/emulators discovered through the adb CLI. */
+class AdbDeviceAdapter implements DeviceAdapter {
+  async isConfigured(): Promise<boolean> {
+    return adbAvailable();
   }
 
   async listDevices(): Promise<QaDeviceInfo[]> {
-    return [];
+    if (!(await adbAvailable())) return [];
+    return adbListDevices();
   }
 }
 
@@ -32,6 +35,6 @@ export const SIMULATED_DEVICE_NAMES = [
 
 let _adapter: DeviceAdapter | null = null;
 export function getDeviceAdapter(): DeviceAdapter {
-  if (!_adapter) _adapter = new StubDeviceAdapter();
+  if (!_adapter) _adapter = new AdbDeviceAdapter();
   return _adapter;
 }

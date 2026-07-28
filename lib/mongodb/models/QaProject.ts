@@ -19,6 +19,10 @@ const qaProjectSchema = new Schema({
   appIconDataUrl: { type: String, default: null },
   sourceFileName: { type: String, default: null },
   fileSizeBytes: { type: Number, default: null },
+
+  // Absolute path to the uploaded binary persisted on disk (APK/IPA). Needed to
+  // install the real app onto a connected device during a real-device run.
+  binaryPath: { type: String, default: null },
 }, { timestamps: true });
 
 export const QaProject = models.QaProject ?? model('QaProject', qaProjectSchema);

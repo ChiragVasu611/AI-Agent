@@ -663,7 +663,7 @@ export interface QaDeviceInfo {
   osVersion: string;
   status: 'online' | 'offline' | 'busy';
   battery: number | null;
-  isStub: true;
+  isStub: boolean;
 }
 
 export type SeoProjectType = 'website' | 'android' | 'ios' | 'flutter' | 'react_native' | 'hybrid' | 'web_app';

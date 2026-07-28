@@ -5,6 +5,7 @@ import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { QaBug } from '@/lib/mongodb/models/QaBug';
 import { serializeDoc } from '@/lib/mongodb/serialize';
+import { reconcileStaleRuns } from '@/lib/qa/reconcile-runs';
 
 export async function GET(req: Request) {
   const user = await getCurrentUser();
@@ -26,6 +27,9 @@ export async function GET(req: Request) {
   const sort = params.get('sort') ?? 'latest';
 
   await connectToDatabase();
+  // Fail any interrupted "running"/"queued" zombie before listing so the runs
+  // table never shows a run stuck forever after its worker died.
+  await reconcileStaleRuns(user.id);
 
   const query: Record<string, unknown> = { userId: user.id };
   if (status) query.status = status;

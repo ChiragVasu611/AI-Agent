@@ -1,3 +1,6 @@
+import os from 'os';
+import path from 'path';
+import fs from 'fs/promises';
 import { parseAppFile } from '@/lib/qa/app-file-parser';
 import type { QaPlatform, QaSourceType } from '@/lib/types';
 
@@ -16,7 +19,7 @@ export const PLATFORM_BY_SOURCE: Record<QaSourceType, QaPlatform> = {
 
 export const BINARY_SOURCE_TYPES = new Set<QaSourceType>(['apk', 'aab', 'ipa']);
 export const BINARY_EXTENSIONS: Record<'apk' | 'aab' | 'ipa', string> = { apk: '.apk', aab: '.aab', ipa: '.ipa' };
-export const MAX_APP_FILE_SIZE_MB = 150;
+export const MAX_APP_FILE_SIZE_MB = 500;
 
 export interface AppInfoFields {
   appPackageName: string | null;
@@ -29,8 +32,11 @@ export interface AppInfoFields {
 }
 
 export type AppUploadResult =
-  | { ok: true; sourceRef: string; appInfo: AppInfoFields }
+  | { ok: true; sourceRef: string; appInfo: AppInfoFields; binaryPath: string | null }
   | { ok: false; error: string };
+
+/** Directory where uploaded APK/IPA binaries are persisted for real-device installs. */
+export const QA_UPLOAD_DIR = path.join(os.tmpdir(), 'qa-app-uploads');
 
 /**
  * Real APK/AAB/IPA binary handling — extracts genuine package/version metadata
@@ -56,9 +62,23 @@ export async function handleAppFileUpload(sourceType: QaSourceType, formData: Fo
   const buffer = Buffer.from(await file.arrayBuffer());
   const parsed = await parseAppFile(buffer, file.name);
 
+  // Persist the binary so a background real-device run can install it later.
+  // Best-effort: if the write fails the run simply falls back to simulated.
+  let binaryPath: string | null = null;
+  try {
+    await fs.mkdir(QA_UPLOAD_DIR, { recursive: true });
+    const safeExt = expectedExt;
+    const dest = path.join(QA_UPLOAD_DIR, `${Date.now()}-${Math.random().toString(36).slice(2)}${safeExt}`);
+    await fs.writeFile(dest, buffer);
+    binaryPath = dest;
+  } catch (e) {
+    console.error('QA app-upload: could not persist binary to disk', e);
+  }
+
   return {
     ok: true,
     sourceRef: file.name,
+    binaryPath,
     appInfo: {
       appPackageName: parsed.packageName,
       appDisplayName: parsed.appName,
