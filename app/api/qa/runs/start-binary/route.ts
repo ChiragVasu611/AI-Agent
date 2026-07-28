@@ -14,6 +14,7 @@ import { DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
 import { PLATFORM_BY_SOURCE, BINARY_SOURCE_TYPES, handleAppFileUpload } from '@/lib/qa/app-upload';
 import { firstOnlineDevice, listDevices } from '@/lib/qa/adb';
 import { nextRunNumber } from '@/lib/qa/run-number';
+import { resolveSheetRows } from '@/app/qa/actions';
 import type { QaSourceType } from '@/lib/types';
 
 /**
@@ -46,6 +47,8 @@ export async function POST(req: Request) {
   const mode = String(formData.get('mode') ?? 'catalog');
   const sourceType = String(formData.get('sourceType') ?? '') as QaSourceType;
   const buildVersion = String(formData.get('buildVersion') ?? '').trim() || '1.0.0';
+  // Device chosen on QA → Devices; null means "use whatever is connected".
+  const deviceSerial = String(formData.get('deviceSerial') ?? '').trim() || null;
 
   if (!sourceType || !BINARY_SOURCE_TYPES.has(sourceType)) {
     return NextResponse.json({ error: `This endpoint only accepts APK, AAB, or IPA uploads (received sourceType="${sourceType || 'none'}").` }, { status: 400 });
@@ -92,23 +95,36 @@ export async function POST(req: Request) {
   }
 
   if (mode === 'uploaded') {
-    const testCaseFile = formData.get('testCaseFile') as File | null;
-    if (!testCaseFile || testCaseFile.size === 0) {
-      return NextResponse.json({ error: 'Upload a test case file (.xlsx or .csv).' }, { status: 400 });
-    }
-    const lowerName = testCaseFile.name.toLowerCase();
-    if (!lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xls') && !lowerName.endsWith('.csv')) {
-      return NextResponse.json({ error: 'Only .xlsx, .xls, or .csv test case files are supported.' }, { status: 400 });
-    }
+    // Repository path: a sheet selected from the Test Case Repository, loaded
+    // directly — no re-upload required.
+    const sheetId = String(formData.get('sheetId') ?? '').trim() || null;
+    const sheetVersionIndexRaw = formData.get('sheetVersionIndex');
+    const sheetVersionIndex = sheetVersionIndexRaw != null && sheetVersionIndexRaw !== '' ? Number(sheetVersionIndexRaw) : null;
 
-    let parsedCases;
-    try {
-      parsedCases = await parseTestCaseFile(testCaseFile);
-    } catch {
-      return NextResponse.json({ error: 'Could not read the uploaded test case file. Confirm it is a valid Excel or CSV file.' }, { status: 400 });
-    }
-    if (parsedCases.length === 0) {
-      return NextResponse.json({ error: 'No test cases were found in the uploaded file. Check the column headers and try again.' }, { status: 400 });
+    // Rows either come fresh from the parser (ParsedTestCase) or from a stored
+    // repository sheet (which additionally carries a subdocument _id to strip).
+    let parsedCases: any[];
+    if (sheetId) {
+      const resolved = await resolveSheetRows(user.id, sheetId, sheetVersionIndex);
+      if ('error' in resolved) return NextResponse.json({ error: resolved.error }, { status: 400 });
+      parsedCases = resolved.rows;
+    } else {
+      const testCaseFile = formData.get('testCaseFile') as File | null;
+      if (!testCaseFile || testCaseFile.size === 0) {
+        return NextResponse.json({ error: 'Select a test case sheet from the repository, or upload one.' }, { status: 400 });
+      }
+      const lowerName = testCaseFile.name.toLowerCase();
+      if (!lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xls') && !lowerName.endsWith('.csv')) {
+        return NextResponse.json({ error: 'Only .xlsx, .xls, or .csv test case files are supported.' }, { status: 400 });
+      }
+      try {
+        parsedCases = await parseTestCaseFile(testCaseFile);
+      } catch {
+        return NextResponse.json({ error: 'Could not read the uploaded test case file. Confirm it is a valid Excel or CSV file.' }, { status: 400 });
+      }
+      if (parsedCases.length === 0) {
+        return NextResponse.json({ error: 'No test cases were found in the uploaded file. Check the column headers and try again.' }, { status: 400 });
+      }
     }
 
     const run = await QaTestRun.create({
@@ -121,10 +137,16 @@ export async function POST(req: Request) {
       runName: `${name} Run #${runNumber}`,
       buildVersion,
       executedByName: user.fullName || user.email,
+      deviceSerial,
       totalCases: parsedCases.length,
     });
 
-    await QaUploadedTestCase.insertMany(parsedCases.map((tc, index) => ({ runId: run._id, order: index, ...tc })));
+    await QaUploadedTestCase.insertMany(parsedCases.map((tc, index) => {
+      // Repository rows carry their own subdocument `_id`; strip it so Mongo
+      // assigns a fresh one for this run's independent copy of the row.
+      const { _id, ...fields } = tc as { _id?: unknown };
+      return { runId: run._id, order: index, ...fields };
+    }));
 
     await ActivityLog.create({
       userId: user.id, action: 'qa.run.start.uploaded', entity: 'qa_test_run', entityId: String(run._id), meta: { name, count: parsedCases.length },
@@ -167,6 +189,7 @@ export async function POST(req: Request) {
     runName: `${name} Run #${runNumber}`,
     buildVersion,
     executedByName: user.fullName || user.email,
+    deviceSerial,
   });
 
   await ActivityLog.create({

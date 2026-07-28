@@ -533,7 +533,9 @@ export interface QaTestRun {
   status: QaRunStatus;
   progress: number;
   sourceMode: QaRunSourceMode;
-  engineMode: 'real_browser' | 'simulated';
+  engineMode: 'real_browser' | 'real_device' | 'simulated' | 'blocked_no_runtime';
+  /** Serial of the device selected on QA → Devices, if any. */
+  deviceSerial: string | null;
   runNumber: number;
   runName: string;
   buildVersion: string;

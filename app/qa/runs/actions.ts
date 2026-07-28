@@ -49,6 +49,8 @@ export async function rerunQaTestRun(runId: string) {
     runName: `${project.name} Run #${runNumber}`,
     buildVersion: original.buildVersion,
     executedByName: user.fullName || user.email,
+    // Re-run targets the same device the original run selected.
+    deviceSerial: original.deviceSerial ?? null,
     totalCases: original.sourceMode === 'uploaded' ? original.totalCases : 0,
   });
 

@@ -30,6 +30,33 @@ function normalizeHeader(h: string): string {
   return String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+/**
+ * Locate the real header row.
+ *
+ * Sheets exported from test-management tools routinely begin with a title
+ * banner ("Keep My Notes - Android"), a blank spacer, or release metadata
+ * before the actual column headings. Assuming row 0 is the header silently
+ * maps nothing — every row then parses with no steps and no expected result,
+ * which looks like a run that executed and passed but in fact executed nothing.
+ *
+ * Scans the first few rows and picks whichever matches the most known columns.
+ */
+function findHeaderRow(rows: unknown[][]): number {
+  const LOOK_AHEAD = Math.min(rows.length, 15);
+  let bestIndex = 0;
+  let bestScore = 0;
+
+  for (let i = 0; i < LOOK_AHEAD; i++) {
+    const score = buildHeaderMap(rows[i]).size;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+  // Need at least two recognised columns to trust a row as the header.
+  return bestScore >= 2 ? bestIndex : 0;
+}
+
 function buildHeaderMap(headerRow: unknown[]): Map<number, keyof ParsedTestCase> {
   const map = new Map<number, keyof ParsedTestCase>();
   headerRow.forEach((raw, idx) => {
@@ -68,10 +95,12 @@ export async function parseTestCaseFile(file: File): Promise<ParsedTestCase[]> {
   const rows: unknown[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false });
   if (rows.length < 2) return [];
 
-  const headerMap = buildHeaderMap(rows[0]);
+  // Skip any title/metadata banner above the real column headings.
+  const headerIndex = findHeaderRow(rows);
+  const headerMap = buildHeaderMap(rows[headerIndex]);
   const cases: ParsedTestCase[] = [];
 
-  for (let i = 1; i < rows.length; i++) {
+  for (let i = headerIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.every((c) => String(c ?? '').trim() === '')) continue;
 

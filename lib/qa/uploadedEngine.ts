@@ -4,105 +4,383 @@ import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { QaBug } from '@/lib/mongodb/models/QaBug';
 import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
 import { QaUploadedTestCase } from '@/lib/mongodb/models/QaUploadedTestCase';
-import { randomScreen } from '@/lib/qa/modules';
 import { generateQaAnalysis, parseJsonLoose } from '@/lib/qa/ai-provider';
 import { placeholderScreenshot } from '@/lib/qa/screenshot';
-import { SIMULATED_DEVICE_NAMES } from '@/lib/qa/device-adapter';
-import { sleep, log } from '@/lib/qa/runtime-helpers';
+import { interpretStep } from '@/lib/qa/step-interpreter';
+import { validateExpectation, type PageSignals } from '@/lib/qa/expectation-validator';
+import {
+  createExecutionSession, executeStep, captureScreenshot, currentScreenName, type ExecutionSession,
+} from '@/lib/qa/web-step-executor';
+import { log } from '@/lib/qa/runtime-helpers';
+import { scanDevices } from '@/lib/qa/device-detect';
+import { prepareAndroidBinary, prepareFromPlayStore, prepareFromAppStore } from '@/lib/qa/app-preparation';
+import { executeAndroidSuite } from '@/lib/qa/uploaded-sheet-engine';
 import { onRunCompleted } from '@/lib/issue-boards/sync';
-import type { QaPriority, QaSeverity } from '@/lib/types';
+import type { QaBugType, QaPriority, QaSeverity } from '@/lib/types';
 
-const STEP_DELAY_MS = 350;
-/** Only the first N cases get a live AI validation call — beyond that we fall back to
- * deterministic simulation so large uploaded sheets don't stall on hundreds of API calls. */
-const AI_VALIDATION_CAP = 15;
+/** Source types the bundled Chromium runtime can genuinely drive end-to-end. */
+const BROWSER_DRIVABLE = new Set(['web_url', 'web_app']);
+
+/** Source types that need a physically connected Android device. */
+const ANDROID_SOURCES = new Set(['apk', 'aab', 'flutter', 'react_native', 'hybrid']);
+
+/** Page-load budget before we raise a real performance defect. */
+const PERF_BUDGET_MS = 4000;
 
 const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
 const VALID_PRIORITIES = new Set(['p1', 'p2', 'p3', 'p4']);
-const VALID_RESULTS = new Set(['pass', 'fail', 'blocked', 'skipped']);
-
-function parseOsVersion(device: string): string {
-  const match = device.match(/\(([^,]+),\s*([^)]+)\)/);
-  return match?.[2] ?? device;
-}
-
-function detectScreen(steps: string[]): string {
-  const text = steps.join(' ').toLowerCase();
-  const SCREEN_KEYWORDS: Record<string, string> = {
-    login: 'Login', signup: 'Signup', register: 'Signup', cart: 'Cart', checkout: 'Checkout',
-    payment: 'Payment', profile: 'Profile', setting: 'Settings', search: 'Search', home: 'Home',
-    splash: 'Splash', onboarding: 'Onboarding', product: 'Product Detail', notification: 'Notifications',
-  };
-  for (const [kw, screen] of Object.entries(SCREEN_KEYWORDS)) {
-    if (text.includes(kw)) return screen;
-  }
-  return randomScreen();
-}
 
 function normalizeSeverity(raw: string): QaSeverity {
-  const s = raw.toLowerCase();
+  const s = String(raw ?? '').toLowerCase();
   return (VALID_SEVERITIES.has(s) ? s : 'medium') as QaSeverity;
 }
 
 function normalizePriority(raw: string, severity: QaSeverity): QaPriority {
-  const p = raw.toLowerCase();
+  const p = String(raw ?? '').toLowerCase();
   if (VALID_PRIORITIES.has(p)) return p as QaPriority;
   return (severity === 'critical' || severity === 'high' ? 'p1' : severity === 'medium' ? 'p2' : 'p3') as QaPriority;
 }
 
-interface AiValidation {
-  result: 'pass' | 'fail' | 'blocked' | 'skipped';
-  actualResult: string;
-  failedStepIndex: number | null;
-  screen: string;
-  bugTitle?: string;
-  bugDescription?: string;
-  aiRootCause?: string;
-  suggestedFix?: string;
+interface StepRecord {
+  stepNumber: number;
+  action: string;
+  instruction: string;
+  status: 'pass' | 'fail' | 'blocked' | 'skipped';
+  actual: string;
+  assertion: string;
+  durationMs: number;
+  url: string;
+  screenshotDataUrl: string | null;
 }
 
-async function validateWithAi(
+/**
+ * AI is used ONLY to explain a failure that real execution already proved.
+ * It can never turn a FAIL into a PASS or invent an outcome.
+ */
+async function explainFailure(
   apiKey: string | null,
-  appName: string,
-  platform: string,
-  tc: { testCaseId: string; module: string; feature: string; scenario: string; preconditions: string; steps: string[]; testData: string; expectedResult: string },
-): Promise<AiValidation | null> {
-  const systemPrompt = 'You are an AI QA test executor. Given an application and one test case (scenario, preconditions, steps, test data, expected result), simulate executing it step by step against the app and report the outcome as JSON. Respond ONLY with minified JSON: {"result":"pass"|"fail"|"blocked"|"skipped","actualResult":string,"failedStepIndex":number|null,"screen":string,"bugTitle":string|null,"bugDescription":string|null,"aiRootCause":string|null,"suggestedFix":string|null}. Only populate bug fields when result is "fail". Bias toward "pass" unless the scenario/steps imply a plausible realistic defect. Be specific to the app and scenario.';
-  const userPrompt = `App: "${appName}" (${platform}).\nTest Case: ${tc.testCaseId} — ${tc.scenario}\nModule/Feature: ${tc.module} / ${tc.feature}\nPreconditions: ${tc.preconditions || 'None'}\nSteps:\n${tc.steps.map((s, i) => `${i + 1}. ${s}`).join('\n') || 'Not specified'}\nTest Data: ${tc.testData || 'None'}\nExpected Result: ${tc.expectedResult || 'Not specified'}\nSimulate execution and report the outcome as JSON.`;
+  ctx: { appName: string; testCaseId: string; scenario: string; step: string; expected: string; actual: string; consoleErrors: string[] },
+): Promise<{ rootCause: string; suggestedFix: string }> {
+  const deterministic = {
+    rootCause: ctx.consoleErrors.length > 0
+      ? `The page reported JavaScript errors while this step ran: ${ctx.consoleErrors.slice(0, 2).join(' | ')}. The failure is most likely caused by that runtime error rather than the test data.`
+      : `Execution reached the step "${ctx.step}" but the observed state did not satisfy the expected result. The element or state the test depends on was not present in the DOM at assertion time.`,
+    suggestedFix: ctx.consoleErrors.length > 0
+      ? 'Fix the JavaScript error surfaced in the console log attached to this bug, then re-run this test case.'
+      : 'Confirm the expected element/label still exists and is rendered before the assertion point; if the UI changed, update the selector or the test case, otherwise fix the regression that removed it.',
+  };
+
+  if (!apiKey && !process.env.OPENROUTER_API_KEY) return deterministic;
 
   try {
-    const content = await generateQaAnalysis(apiKey, { systemPrompt, userPrompt, maxTokens: 500 });
+    const content = await generateQaAnalysis(apiKey, {
+      systemPrompt: 'You are a senior QA engineer analysing a test failure that has ALREADY been observed by a real browser automation run. Do not question whether it failed. Explain the most likely root cause and a concrete fix. Respond ONLY with minified JSON: {"rootCause":string,"suggestedFix":string}.',
+      userPrompt: `App: ${ctx.appName}\nTest Case: ${ctx.testCaseId} — ${ctx.scenario}\nFailing step: ${ctx.step}\nExpected: ${ctx.expected}\nActually observed: ${ctx.actual}\nConsole errors: ${ctx.consoleErrors.slice(0, 3).join(' | ') || 'none'}`,
+      maxTokens: 320,
+    });
     const parsed = parseJsonLoose(content);
-    if (!parsed || !VALID_RESULTS.has(String(parsed.result))) return null;
-    return parsed as unknown as AiValidation;
+    const rootCause = typeof parsed?.rootCause === 'string' ? parsed.rootCause : '';
+    const suggestedFix = typeof parsed?.suggestedFix === 'string' ? parsed.suggestedFix : '';
+    return {
+      rootCause: rootCause || deterministic.rootCause,
+      suggestedFix: suggestedFix || deterministic.suggestedFix,
+    };
   } catch {
-    return null;
+    return deterministic;
   }
 }
 
-function fallbackValidation(tc: { steps: string[]; expectedResult: string }): AiValidation {
-  const roll = Math.random();
-  const screen = detectScreen(tc.steps);
-  if (roll < 0.68) {
-    return { result: 'pass', actualResult: tc.expectedResult || 'Behavior matched expectations.', failedStepIndex: null, screen };
+/**
+ * Marks every case blocked with a truthful reason. Used when the uploaded
+ * artifact has no runtime we can actually execute against — we refuse to
+ * fabricate pass/fail rather than report results that mean nothing.
+ */
+async function blockAll(runId: string, run: any, cases: any[], reason: string, projectName: string) {
+  await log(runId, 'automation', 'warn', reason);
+  for (let i = 0; i < cases.length; i++) {
+    const tc = cases[i];
+    tc.result = 'blocked';
+    tc.actualResult = reason;
+    tc.failedStepIndex = null;
+    tc.screenName = 'Not executed';
+    tc.stepResults = tc.steps.map((s: string, idx: number) => ({
+      stepNumber: idx + 1,
+      action: interpretStep(s, tc.testData).kind,
+      instruction: s,
+      status: 'blocked' as const,
+      actual: 'Not executed — no runtime available for this application type.',
+      assertion: 'none',
+      durationMs: 0,
+      url: '',
+      screenshotDataUrl: null,
+    }));
+    await tc.save();
+    run.blockedCases = i + 1;
+    run.totalCases = i + 1;
+    run.progress = Math.round(((i + 1) / Math.max(cases.length, 1)) * 100);
+    await run.save();
   }
-  if (roll < 0.9) {
-    const failedStepIndex = tc.steps.length > 0 ? Math.floor(Math.random() * tc.steps.length) : null;
+
+  await QaScreenshot.create({
+    runId,
+    screenName: 'Execution blocked',
+    testStep: 'Runtime unavailable',
+    imageDataUrl: placeholderScreenshot('Execution blocked', 'Runtime', runId, projectName),
+  });
+
+  run.status = 'partial';
+  run.progress = 100;
+  run.currentStep = 'Blocked — no execution runtime';
+  run.currentCase = null;
+  run.etaSeconds = 0;
+  run.completedAt = new Date();
+  await run.save();
+  await log(runId, 'automation', 'warn', `Run finished: ${cases.length} test case(s) BLOCKED. No results were fabricated.`);
+  await onRunCompleted(runId);
+}
+
+/**
+ * Cross-cutting defect scan over signals the browser genuinely produced during
+ * the run — surfaces issues the uploaded sheet never asked about.
+ */
+async function detectCrossCuttingBugs(
+  runId: string,
+  run: any,
+  project: any,
+  session: ExecutionSession,
+  slowestLoadMs: number,
+  nextBugNumber: () => string,
+): Promise<number> {
+  const page = session.page;
+  const found: Array<{ type: QaBugType; severity: QaSeverity; title: string; description: string; expected: string; actual: string; fix: string }> = [];
+
+  const audit = await page.evaluate(() => {
+    const imgs = Array.from(document.querySelectorAll('img'));
+    const inputs = Array.from(document.querySelectorAll('input, textarea, select'));
     return {
-      result: 'fail',
-      actualResult: 'Actual behavior diverged from the expected result during simulated execution.',
-      failedStepIndex,
-      screen,
-      bugTitle: `Unexpected behavior on ${screen}`,
-      bugDescription: `The observed outcome did not match the expected result for this scenario on ${screen}.`,
-      aiRootCause: 'Likely a regression or edge case not covered by the current implementation.',
-      suggestedFix: 'Reproduce the scenario manually, inspect the relevant screen/component logic, and add a regression test.',
+      imagesMissingAlt: imgs.filter((i) => !i.hasAttribute('alt')).length,
+      brokenImages: imgs.filter((i) => i.complete && i.naturalWidth === 0).length,
+      inputsMissingLabel: inputs.filter((el) => {
+        const id = el.getAttribute('id');
+        const labelled = id ? Boolean(document.querySelector(`label[for="${id}"]`)) : false;
+        return !labelled && !el.hasAttribute('aria-label') && !el.hasAttribute('aria-labelledby');
+      }).length,
+      hasViewportMeta: Boolean(document.querySelector('meta[name="viewport"]')),
+      htmlLang: document.documentElement.getAttribute('lang'),
+      horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth + 4,
     };
+  }).catch(() => null);
+
+  const url = page.url();
+
+  if (!/^https:/i.test(url) && !/localhost|127\.0\.0\.1/.test(url)) {
+    found.push({
+      type: 'security', severity: 'high',
+      title: 'Application is served over plain HTTP',
+      description: `The target "${url}" is not served over HTTPS. Credentials and session tokens transit in cleartext.`,
+      expected: 'All traffic served over HTTPS.', actual: `Page loaded over ${new URL(url).protocol}`,
+      fix: 'Terminate TLS at the edge and force an HTTP→HTTPS redirect plus HSTS.',
+    });
   }
-  if (roll < 0.96) {
-    return { result: 'blocked', actualResult: 'Execution could not proceed — a precondition or dependency was not met.', failedStepIndex: null, screen };
+  if (session.signals.pageErrors.length > 0) {
+    found.push({
+      type: 'crash', severity: 'critical',
+      title: 'Uncaught JavaScript exception during execution',
+      description: `The application threw ${session.signals.pageErrors.length} uncaught exception(s) while the suite ran.`,
+      expected: 'No uncaught exceptions during normal user flows.',
+      actual: session.signals.pageErrors.slice(0, 3).join(' | '),
+      fix: 'Reproduce the flow with the browser console open and add error handling around the throwing call site.',
+    });
   }
-  return { result: 'skipped', actualResult: 'Skipped — not applicable in this simulated environment.', failedStepIndex: null, screen };
+  if (session.signals.consoleErrors.length > 0) {
+    found.push({
+      type: 'functional', severity: 'medium',
+      title: `${session.signals.consoleErrors.length} console error(s) logged during execution`,
+      description: 'The application logged errors to the browser console while the suite ran.',
+      expected: 'A clean console during normal user flows.',
+      actual: session.signals.consoleErrors.slice(0, 3).join(' | '),
+      fix: 'Triage each console error; they frequently precede user-visible defects.',
+    });
+  }
+  const failedApis = session.signals.apiCalls.filter((c) => c.status >= 400);
+  if (failedApis.length > 0) {
+    found.push({
+      type: 'api', severity: failedApis.some((c) => c.status >= 500) ? 'critical' : 'high',
+      title: `${failedApis.length} API call(s) returned an error status`,
+      description: 'Backend calls made during execution returned 4xx/5xx responses.',
+      expected: 'All API calls return success statuses during the tested flows.',
+      actual: failedApis.slice(0, 4).map((c) => `${c.status} ${c.url}`).join('; '),
+      fix: 'Inspect the listed endpoints; fix the server error or the client request payload.',
+    });
+  }
+  if (session.signals.failedRequests.length > 0) {
+    found.push({
+      type: 'network', severity: 'medium',
+      title: `${session.signals.failedRequests.length} network request(s) failed to complete`,
+      description: 'Requests were aborted or could not be resolved during execution.',
+      expected: 'All network requests complete successfully.',
+      actual: session.signals.failedRequests.slice(0, 3).join(' | '),
+      fix: 'Check for broken asset URLs, CORS rejections, or blocked third-party hosts.',
+    });
+  }
+  if (slowestLoadMs > PERF_BUDGET_MS) {
+    found.push({
+      type: 'performance', severity: slowestLoadMs > PERF_BUDGET_MS * 2 ? 'high' : 'medium',
+      title: `Slow page load — ${(slowestLoadMs / 1000).toFixed(1)}s`,
+      description: `The slowest navigation during this run took ${slowestLoadMs}ms, over the ${PERF_BUDGET_MS}ms budget.`,
+      expected: `Page loads complete within ${PERF_BUDGET_MS}ms.`, actual: `${slowestLoadMs}ms`,
+      fix: 'Profile the critical path; defer non-essential scripts and compress render-blocking assets.',
+    });
+  }
+  if (audit) {
+    if (audit.imagesMissingAlt > 0 || audit.inputsMissingLabel > 0) {
+      found.push({
+        type: 'accessibility', severity: 'medium',
+        title: 'Accessibility violations on the executed screens',
+        description: `${audit.imagesMissingAlt} image(s) without alt text and ${audit.inputsMissingLabel} form control(s) without an accessible label.`,
+        expected: 'All images have alt text and all inputs have accessible labels.',
+        actual: `imagesMissingAlt=${audit.imagesMissingAlt}, inputsMissingLabel=${audit.inputsMissingLabel}`,
+        fix: 'Add alt attributes and associate every input with a <label for> or aria-label.',
+      });
+    }
+    if (audit.brokenImages > 0) {
+      found.push({
+        type: 'ui', severity: 'medium',
+        title: `${audit.brokenImages} image(s) failed to render`,
+        description: 'Images are present in the DOM but resolved to zero intrinsic width — the asset did not load.',
+        expected: 'All referenced images load and render.', actual: `${audit.brokenImages} broken image(s)`,
+        fix: 'Fix the broken asset paths or add a fallback image.',
+      });
+    }
+    if (!audit.hasViewportMeta || audit.horizontalOverflow) {
+      found.push({
+        type: 'compatibility', severity: 'medium',
+        title: !audit.hasViewportMeta ? 'Missing responsive viewport meta tag' : 'Layout overflows horizontally',
+        description: !audit.hasViewportMeta
+          ? 'No <meta name="viewport"> tag — the layout will not adapt on mobile devices.'
+          : 'Document scroll width exceeds the viewport, forcing horizontal scrolling.',
+        expected: 'Layout adapts to the viewport without horizontal scrolling.',
+        actual: `hasViewportMeta=${audit.hasViewportMeta}, horizontalOverflow=${audit.horizontalOverflow}`,
+        fix: 'Add the viewport meta tag and constrain fixed-width elements with max-width:100%.',
+      });
+    }
+  }
+
+  const shot = await captureScreenshot(page);
+  for (const f of found) {
+    await QaBug.create({
+      userId: run.userId, projectId: run.projectId, runId,
+      type: f.type, module: 'Cross-cutting scan', feature: 'Automated audit',
+      severity: f.severity, priority: normalizePriority('', f.severity),
+      bugNumber: nextBugNumber(), testCaseId: '', failedStepNumber: null,
+      title: f.title, description: f.description,
+      screenName: await currentScreenName(page),
+      stepsToReproduce: [`Open ${url}`, 'Run the uploaded test suite', 'Observe the reported signal'],
+      expectedResult: f.expected, actualResult: f.actual,
+      screenshotDataUrl: shot,
+      logs: session.signals.consoleErrors.slice(0, 5).join('\n') || 'No console output captured.',
+      stackTrace: session.signals.pageErrors[0] ?? null,
+      apiRequest: null,
+      apiResponse: failedApis.slice(0, 3).map((c) => `${c.status} ${c.url}`).join('\n') || null,
+      deviceInfo: run.currentDevice, osVersion: 'Chromium (headless)', appVersion: run.buildVersion,
+      aiRootCause: f.description, suggestedFix: f.fix,
+    });
+    await log(runId, 'error', 'warn', `Cross-cutting defect: ${f.title}`);
+  }
+  return found.length;
+}
+
+/**
+ * Full physical-device path: pick the connected device, prepare the app
+ * (install → verify → launch → confirm foreground), then execute the sheet.
+ * Execution only begins once the app is genuinely open.
+ */
+async function runOnAndroidDevice(
+  runId: string,
+  run: any,
+  project: any,
+  cases: any[],
+  sourceType: string,
+  sourceRef: string,
+) {
+  // 1. Find a usable, authorized device — preferring the one the user picked.
+  const scan = await scanDevices();
+  const usable = scan.devices.filter((d) => d.platform === 'android' && d.state === 'online');
+  const wanted = run.deviceSerial ? String(run.deviceSerial) : null;
+  const device = (wanted ? usable.find((d) => d.id === wanted) : null) ?? usable[0];
+
+  if (wanted && device && device.id !== wanted) {
+    await log(runId, 'automation', 'warn', `Selected device "${wanted}" is not connected; falling back to ${device.name} (${device.id}).`);
+  } else if (wanted && device) {
+    await log(runId, 'automation', 'info', `Using the device selected in QA → Devices: ${device.name} (${device.id}).`);
+  } else if (!wanted && usable.length > 1) {
+    await log(runId, 'automation', 'warn', `${usable.length} devices are connected and none was selected — using ${usable[0].name} (${usable[0].id}). Pick one in QA → Devices to choose explicitly.`);
+  }
+
+  if (!device) {
+    run.currentDevice = 'No device connected';
+    run.engineMode = 'blocked_no_runtime';
+    await run.save();
+    const androidIssue = scan.issues.find((i) => i.platform === 'android');
+    const reason = `Execution blocked: no authorized Android device is connected over USB, so the application cannot be installed or launched.${androidIssue ? ` ${androidIssue.title} — ${androidIssue.detail}` : ''} Connect a device (see QA → Devices) and start a new run.`;
+    await blockAll(runId, run, cases, reason, project.name);
+    return;
+  }
+
+  const deviceLabel = `${device.name} (${device.model}, ${device.osVersion})`;
+  run.currentDevice = deviceLabel;
+  run.engineMode = 'real_browser'; // real hardware execution, not a simulation
+  await run.save();
+  await log(runId, 'automation', 'info', `Preparing "${project.name}" on ${deviceLabel} (${device.id}).`);
+
+  // 2. Prepare the app — never execute before it is genuinely running.
+  const prep = sourceType === 'play_store_url'
+    ? await prepareFromPlayStore(device.id, sourceRef)
+    : await prepareAndroidBinary(device.id, project.binaryPath ?? null, project.appPackageName ?? null, project.sourceFileName ?? sourceRef);
+
+  for (const s of prep.steps) {
+    await log(runId, 'automation', s.ok ? 'info' : 'warn', `Preparation — ${s.label}: ${s.detail}`);
+  }
+
+  if (!prep.ready) {
+    if (prep.screenshot) {
+      await QaScreenshot.create({
+        runId, screenName: 'Preparation failed', testStep: 'Preparation', imageDataUrl: prep.screenshot,
+      });
+    }
+    run.engineMode = 'blocked_no_runtime';
+    await run.save();
+    await blockAll(runId, run, cases, `Execution blocked before it began: ${prep.blockedReason}`, project.name);
+    return;
+  }
+
+  await log(runId, 'automation', 'info', `Application is running on ${deviceLabel}. Starting execution of ${cases.length} test case(s).`);
+
+  // 3. Execute the sheet against the live app.
+  let totals;
+  try {
+    totals = await executeAndroidSuite({ runId, run, project, cases, serial: device.id, deviceLabel, prep });
+  } catch (e) {
+    await log(runId, 'error', 'error', `Device execution aborted: ${(e as Error).message}`);
+    run.status = 'failed';
+    run.currentStep = `Aborted: ${(e as Error).message}`;
+    run.completedAt = new Date();
+    await run.save();
+    await onRunCompleted(runId);
+    return;
+  }
+
+  const { passed, failed, blocked } = totals;
+  run.status = failed > 0 ? (passed > 0 ? 'partial' : 'failed') : blocked > 0 ? 'partial' : 'passed';
+  run.progress = 100;
+  run.currentStep = 'Completed';
+  run.currentCase = null;
+  run.etaSeconds = 0;
+  run.completedAt = new Date();
+  await run.save();
+
+  await log(runId, 'automation', 'info', `Run completed on ${deviceLabel}: ${run.status.toUpperCase()} — ${passed}/${cases.length} passed, ${failed} failed, ${blocked} blocked.`);
+  await onRunCompleted(runId);
 }
 
 export async function runUploadedTestExecution(runId: string, apiKey: string | null) {
@@ -110,7 +388,7 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
 
   const run = await QaTestRun.findById(runId);
   if (!run) return;
-  const project = await QaProject.findById(run.projectId).lean();
+  const project = await QaProject.findById(run.projectId).lean<any>();
   if (!project) return;
 
   const cases = await QaUploadedTestCase.find({ runId }).sort({ order: 1 });
@@ -118,130 +396,262 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
 
   run.status = 'running';
   run.startedAt = new Date();
-  run.currentDevice = SIMULATED_DEVICE_NAMES[Math.floor(Math.random() * SIMULATED_DEVICE_NAMES.length)];
-  run.estimatedSeconds = total * (STEP_DELAY_MS / 1000) * 3;
+  run.totalCases = total;
   await run.save();
 
-  const device = run.currentDevice as string;
-  const osVersion = parseOsVersion(device);
+  const sourceType = String(project.sourceType);
+  const sourceRef = String(project.sourceRef ?? '');
+  const canDrive = BROWSER_DRIVABLE.has(sourceType) && /^https?:\/\//i.test(sourceRef);
 
-  await log(runId, 'automation', 'info', `Starting uploaded test suite for "${(project as any).name}" — ${total} test case(s) on ${device}.`);
+  // ---- Physical Android device: install → launch → execute for real. ----
+  if (ANDROID_SOURCES.has(sourceType) || sourceType === 'play_store_url') {
+    await runOnAndroidDevice(runId, run, project, cases, sourceType, sourceRef);
+    return;
+  }
+
+  // ---- iOS store/binary: no runtime on this host. ----
+  if (sourceType === 'app_store_url' || sourceType === 'ipa') {
+    run.currentDevice = 'No iOS runtime attached';
+    run.engineMode = 'blocked_no_runtime';
+    await run.save();
+    const prep = await prepareFromAppStore(sourceRef);
+    for (const s of prep.steps) {
+      await log(runId, 'automation', s.ok ? 'info' : 'warn', `Preparation — ${s.label}: ${s.detail}`);
+    }
+    await blockAll(runId, run, cases, prep.blockedReason ?? 'No iOS execution runtime is available on this host.', project.name);
+    return;
+  }
+
+  // ---- No real runtime for this artifact: block honestly, never fabricate. ----
+  if (!canDrive) {
+    run.currentDevice = 'No runtime attached';
+    run.engineMode = 'blocked_no_runtime';
+    await run.save();
+    await blockAll(runId, run, cases, `Execution blocked: "${sourceRef}" is not a valid http(s) URL, so there is nothing to drive.`, project.name);
+    return;
+  }
+
+  // ---- Real browser execution ----
+  run.currentDevice = 'Chromium (headless, 1366x900)';
+  run.engineMode = 'real_browser';
+  await run.save();
+
+  await log(runId, 'automation', 'info', `Starting REAL browser execution of ${total} uploaded test case(s) against ${sourceRef}.`);
+
+  let session: ExecutionSession;
+  try {
+    session = await createExecutionSession(sourceRef);
+  } catch (e) {
+    await blockAll(runId, run, cases, `Execution blocked: the browser runtime failed to start — ${(e as Error).message}`, project.name);
+    return;
+  }
 
   let passed = 0;
   let failed = 0;
   let blocked = 0;
   let skipped = 0;
   let bugSeq = 0;
+  let slowestLoadMs = 0;
+  const nextBugNumber = () => `BUG-${run.runNumber}-${String(++bugSeq).padStart(3, '0')}`;
   const severityCounts: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
   const caseElapsedMs: number[] = [];
 
-  for (let i = 0; i < cases.length; i++) {
-    const tc = cases[i];
-    const caseStart = Date.now();
+  try {
+    // Load the target once up front so the first case starts from a real page.
+    const navStart = Date.now();
+    await session.page.goto(sourceRef, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
+    slowestLoadMs = Math.max(slowestLoadMs, Date.now() - navStart);
+    await log(runId, 'automation', 'info', `Loaded ${sourceRef} in ${Date.now() - navStart}ms.`);
 
-    run.currentSuite = tc.module;
-    run.currentFeature = tc.feature;
-    run.currentCase = `${tc.testCaseId}: ${tc.scenario}`;
-    run.progress = Math.round((i / Math.max(total, 1)) * 100);
-    await run.save();
-    await log(runId, 'automation', 'info', `[${tc.testCaseId}] ${tc.scenario} — starting.`);
+    for (let i = 0; i < cases.length; i++) {
+      const tc = cases[i];
+      const caseStart = Date.now();
 
-    for (let si = 0; si < tc.steps.length; si++) {
-      run.currentStep = `Step ${si + 1}/${tc.steps.length}: ${tc.steps[si]}`;
-      run.currentScreen = detectScreen([tc.steps[si]]);
+      run.currentSuite = tc.module;
+      run.currentFeature = tc.feature;
+      run.currentCase = `${tc.testCaseId}: ${tc.scenario}`;
+      run.progress = Math.round((i / Math.max(total, 1)) * 100);
       await run.save();
-      await sleep(STEP_DELAY_MS);
-    }
-    if (tc.steps.length === 0) {
-      run.currentStep = 'Executing scenario';
+      await log(runId, 'automation', 'info', `[${tc.testCaseId}] ${tc.scenario} — executing ${tc.steps.length} step(s).`);
+
+      const stepRecords: StepRecord[] = [];
+      let firstFailedStepIndex: number | null = null;
+      let firstFailureDetail = '';
+
+      // ---- Execute every step, in order, for real. ----
+      for (let si = 0; si < tc.steps.length; si++) {
+        const instruction = tc.steps[si];
+        const action = interpretStep(instruction, tc.testData);
+
+        run.currentStep = `Step ${si + 1}/${tc.steps.length}: ${instruction}`;
+        await run.save();
+
+        // Once a step has failed, the app is off the expected path — the rest
+        // are reported as skipped rather than executed against a wrong state.
+        if (firstFailedStepIndex !== null) {
+          stepRecords.push({
+            stepNumber: si + 1, action: action.kind, instruction, status: 'skipped',
+            actual: 'Not executed — a previous step in this test case already failed.',
+            assertion: 'none', durationMs: 0, url: session.page.url(), screenshotDataUrl: null,
+          });
+          continue;
+        }
+
+        session.resetSignals();
+        const stepStart = Date.now();
+        const exec = await executeStep(session.page, action, sourceRef);
+        const durationMs = Date.now() - stepStart;
+        if (action.kind === 'navigate') slowestLoadMs = Math.max(slowestLoadMs, durationMs);
+
+        let status: StepRecord['status'] = exec.ok ? 'pass' : 'fail';
+        let actual = exec.detail;
+        let assertion: string = action.kind;
+
+        // A 'verify' step carries its own inline assertion — check it for real.
+        if (exec.ok && action.kind === 'verify') {
+          const v = await validateExpectation(session.page, action.raw, session.signals);
+          status = v.status === 'pass' ? 'pass' : v.status === 'fail' ? 'fail' : 'blocked';
+          actual = v.actual;
+          assertion = v.assertion;
+        } else if (action.kind === 'unknown') {
+          // Unmappable steps are blocked, not silently passed.
+          status = 'blocked';
+        }
+
+        const shot = await captureScreenshot(session.page);
+        const screen = await currentScreenName(session.page);
+
+        stepRecords.push({
+          stepNumber: si + 1, action: action.kind, instruction, status, actual, assertion,
+          durationMs, url: session.page.url(), screenshotDataUrl: shot,
+        });
+
+        await QaScreenshot.create({
+          runId, screenName: `${screen} — step ${si + 1}`, testStep: tc.scenario,
+          imageDataUrl: shot ?? placeholderScreenshot(screen, tc.module, runId, project.name),
+        });
+
+        run.currentScreen = screen;
+        await run.save();
+
+        if (status === 'fail' || status === 'blocked') {
+          firstFailedStepIndex = si;
+          firstFailureDetail = actual;
+          await log(runId, 'error', status === 'fail' ? 'error' : 'warn', `[${tc.testCaseId}] Step ${si + 1} ${status.toUpperCase()}: ${actual}`);
+        } else {
+          await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1} PASS: ${actual}`);
+        }
+      }
+
+      // ---- Validate the case-level Expected Result against the live page. ----
+      // A whole case is never 'skipped' here — only individual steps are, once
+      // an earlier step in the same case has already failed.
+      let finalResult: 'pass' | 'fail' | 'blocked';
+      let finalActual: string;
+
+      if (firstFailedStepIndex !== null) {
+        const failedRec = stepRecords[firstFailedStepIndex];
+        finalResult = failedRec.status === 'blocked' ? 'blocked' : 'fail';
+        finalActual = `Step ${firstFailedStepIndex + 1} ("${failedRec.instruction}") ${failedRec.status === 'blocked' ? 'could not be executed' : 'failed'}: ${firstFailureDetail}`;
+      } else {
+        const v = await validateExpectation(session.page, tc.expectedResult, session.signals);
+        finalResult = v.status === 'pass' ? 'pass' : v.status === 'fail' ? 'fail' : 'blocked';
+        finalActual = v.actual;
+        if (v.status !== 'pass' && stepRecords.length > 0) {
+          firstFailedStepIndex = stepRecords.length - 1;
+          stepRecords[stepRecords.length - 1].status = v.status === 'fail' ? 'fail' : 'blocked';
+          stepRecords[stepRecords.length - 1].actual = v.actual;
+          stepRecords[stepRecords.length - 1].assertion = v.assertion;
+        }
+      }
+
+      const screen = await currentScreenName(session.page);
+      tc.result = finalResult;
+      tc.actualResult = finalActual;
+      tc.failedStepIndex = firstFailedStepIndex;
+      tc.screenName = screen;
+      tc.stepResults = stepRecords;
+
+      if (finalResult === 'pass') {
+        passed += 1;
+        await log(runId, 'automation', 'info', `[${tc.testCaseId}] PASSED — expected result verified against the live page.`);
+      } else if (finalResult === 'blocked') {
+        blocked += 1;
+        await log(runId, 'automation', 'warn', `[${tc.testCaseId}] BLOCKED — ${finalActual}`);
+      } else {
+        failed += 1;
+        const severity = normalizeSeverity(tc.severity);
+        const priority = normalizePriority(tc.priority, severity);
+        const failedStepNumber = firstFailedStepIndex != null ? firstFailedStepIndex + 1 : null;
+        const evidenceShot = (firstFailedStepIndex != null ? stepRecords[firstFailedStepIndex]?.screenshotDataUrl : null)
+          ?? await captureScreenshot(session.page);
+
+        const explanation = await explainFailure(apiKey, {
+          appName: project.name, testCaseId: tc.testCaseId, scenario: tc.scenario,
+          step: firstFailedStepIndex != null ? stepRecords[firstFailedStepIndex].instruction : tc.scenario,
+          expected: tc.expectedResult, actual: finalActual, consoleErrors: session.signals.consoleErrors,
+        });
+
+        const bug = await QaBug.create({
+          userId: run.userId, projectId: run.projectId, runId,
+          type: 'functional', module: tc.module, feature: tc.feature,
+          severity, priority, bugNumber: nextBugNumber(),
+          testCaseId: tc.testCaseId, failedStepNumber,
+          title: `${tc.testCaseId}: ${tc.scenario} — expected result not achieved`,
+          description: `Real browser execution of this test case diverged from the sheet's expected result at step ${failedStepNumber ?? '—'}. ${finalActual}`,
+          screenName: screen,
+          stepsToReproduce: tc.steps.length > 0 ? tc.steps : [tc.scenario],
+          expectedResult: tc.expectedResult,
+          actualResult: finalActual,
+          screenshotDataUrl: evidenceShot,
+          logs: [
+            `URL at failure: ${session.page.url()}`,
+            ...stepRecords.map((s) => `Step ${s.stepNumber} [${s.status}] ${s.instruction} → ${s.actual}`),
+            ...(session.signals.consoleErrors.length > 0 ? ['', 'Console errors:', ...session.signals.consoleErrors.slice(0, 5)] : []),
+          ].join('\n'),
+          stackTrace: session.signals.pageErrors[0] ?? null,
+          apiRequest: null,
+          apiResponse: session.signals.apiCalls.slice(0, 5).map((c) => `${c.status} ${c.url} (${c.ms}ms)`).join('\n') || null,
+          deviceInfo: run.currentDevice, osVersion: 'Chromium (headless)', appVersion: run.buildVersion,
+          aiRootCause: explanation.rootCause, suggestedFix: explanation.suggestedFix,
+        });
+
+        tc.bugId = bug._id;
+        severityCounts[severity] += 1;
+        await log(runId, 'error', 'error', `[${tc.testCaseId}] FAILED at step ${failedStepNumber ?? '—'} — bug ${bug.bugNumber} created with evidence.`);
+      }
+
+      await tc.save();
+
+      caseElapsedMs.push(Date.now() - caseStart);
+      const avgMs = caseElapsedMs.reduce((a, b) => a + b, 0) / caseElapsedMs.length;
+      const remaining = total - (i + 1);
+      run.etaSeconds = remaining > 0 ? Math.round((avgMs * remaining) / 1000) : 0;
+      run.passedCases = passed;
+      run.failedCases = failed;
+      run.blockedCases = blocked;
+      run.skippedCases = skipped;
       await run.save();
-      await sleep(STEP_DELAY_MS);
     }
 
-    const validation = i < AI_VALIDATION_CAP
-      ? (await validateWithAi(apiKey, (project as any).name, (project as any).platform, tc)) ?? fallbackValidation(tc)
-      : fallbackValidation(tc);
-
-    const screen = validation.screen || run.currentScreen || randomScreen();
-    run.currentScreen = screen;
-
-    await QaScreenshot.create({
-      runId, screenName: screen, testStep: tc.scenario, imageDataUrl: placeholderScreenshot(screen, tc.module, runId, (project as any).name),
-    });
-
-    tc.result = validation.result;
-    tc.actualResult = validation.actualResult;
-    tc.failedStepIndex = validation.failedStepIndex;
-    tc.screenName = screen;
-
-    if (validation.result === 'pass') {
-      passed += 1;
-      await log(runId, 'automation', 'info', `[${tc.testCaseId}] PASSED.`);
-    } else if (validation.result === 'blocked') {
-      blocked += 1;
-      await log(runId, 'automation', 'warn', `[${tc.testCaseId}] BLOCKED — precondition not met.`);
-    } else if (validation.result === 'skipped') {
-      skipped += 1;
-      await log(runId, 'automation', 'info', `[${tc.testCaseId}] SKIPPED.`);
-    } else {
-      failed += 1;
-      const severity = normalizeSeverity(tc.severity);
-      const priority = normalizePriority(tc.priority, severity);
-      bugSeq += 1;
-      const bugNumber = `BUG-${run.runNumber}-${String(bugSeq).padStart(3, '0')}`;
-      const failedStepNumber = validation.failedStepIndex != null ? validation.failedStepIndex + 1 : null;
-
-      const bug = await QaBug.create({
-        userId: run.userId,
-        projectId: run.projectId,
-        runId,
-        type: 'functional',
-        module: tc.module,
-        feature: tc.feature,
-        severity,
-        priority,
-        bugNumber,
-        testCaseId: tc.testCaseId,
-        failedStepNumber,
-        title: validation.bugTitle || `${tc.scenario} did not produce the expected result`,
-        description: validation.bugDescription || 'The actual result diverged from the expected result for this test case.',
-        screenName: screen,
-        stepsToReproduce: tc.steps.length > 0 ? tc.steps : [tc.scenario],
-        expectedResult: tc.expectedResult,
-        actualResult: validation.actualResult,
-        screenshotDataUrl: placeholderScreenshot(screen, tc.module, runId, (project as any).name),
-        logs: `[${tc.testCaseId}] Failure captured on ${device} during automated execution.`,
-        stackTrace: null,
-        apiRequest: null,
-        apiResponse: null,
-        deviceInfo: device,
-        osVersion,
-        appVersion: run.buildVersion,
-        aiRootCause: validation.aiRootCause || 'Root cause could not be determined automatically.',
-        suggestedFix: validation.suggestedFix || 'Manually reproduce the scenario and inspect the relevant screen/component.',
-      });
-
-      tc.bugId = bug._id;
-      severityCounts[severity] += 1;
-      await log(runId, 'error', 'error', `[${tc.testCaseId}] FAILED (step ${failedStepNumber ?? '—'}) — bug ${bugNumber} created.`);
-    }
-
-    await tc.save();
-
-    caseElapsedMs.push(Date.now() - caseStart);
-    const avgMs = caseElapsedMs.reduce((a, b) => a + b, 0) / caseElapsedMs.length;
-    const remaining = total - (i + 1);
-    run.etaSeconds = remaining > 0 ? Math.round((avgMs * remaining) / 1000) : 0;
-    run.passedCases = passed;
-    run.failedCases = failed;
-    run.blockedCases = blocked;
-    run.skippedCases = skipped;
-    run.totalCases = i + 1;
+    await log(runId, 'automation', 'info', 'Running cross-cutting defect scan over signals captured during execution.');
+    const extra = await detectCrossCuttingBugs(runId, run, project, session, slowestLoadMs, nextBugNumber);
+    if (extra > 0) await log(runId, 'automation', 'warn', `Cross-cutting scan raised ${extra} additional defect(s).`);
+  } catch (e) {
+    await log(runId, 'error', 'error', `Execution aborted: ${(e as Error).message}`);
+    run.status = 'failed';
+    run.currentStep = `Aborted: ${(e as Error).message}`;
+    run.completedAt = new Date();
     await run.save();
+    await session.close();
+    await onRunCompleted(runId);
+    return;
   }
 
+  await session.close();
+
   const criticalOrHigh = severityCounts.critical + severityCounts.high;
-  run.status = criticalOrHigh > 0 ? 'failed' : (failed + blocked) > 0 ? 'partial' : 'passed';
+  run.status = criticalOrHigh > 0 || failed > 0 ? (passed > 0 ? 'partial' : 'failed') : blocked > 0 ? 'partial' : 'passed';
   run.progress = 100;
   run.currentStep = 'Completed';
   run.currentCase = null;

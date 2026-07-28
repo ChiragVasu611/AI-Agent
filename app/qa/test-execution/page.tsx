@@ -7,6 +7,7 @@ import { Loader2, Play, Trash2, UploadCloud } from 'lucide-react';
 import { toast } from 'sonner';
 import { startTestExecution } from '@/app/qa/actions';
 import { submitBinaryRun } from '@/lib/qa/submit-binary-run';
+import { SelectedDeviceBanner } from '@/components/modules/qa/selected-device-banner';
 import { QA_MODULES, DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -85,7 +86,9 @@ export default function TestExecutionPage() {
       try {
         const res = await fetch('/api/qa/devices');
         const data = await res.json();
-        if (!cancelled) setDevices((data.devices ?? []).filter((d: any) => d.status === 'online'));
+        if (!cancelled) {
+          setDevices((data.devices ?? []).filter((d: any) => d.state === 'online' && d.platform === 'android'));
+        }
       } catch { /* ignore */ }
     }
     loadDevices();
@@ -224,6 +227,8 @@ export default function TestExecutionPage() {
               ))}
             </div>
           </div>
+
+          <SelectedDeviceBanner show={isBinarySource || sourceType === 'play_store_url'} />
 
           <Button type="submit" disabled={pending} className="gap-2">
             {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}

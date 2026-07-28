@@ -1,6 +1,5 @@
-import os from 'os';
-import path from 'path';
 import fs from 'fs/promises';
+import path from 'path';
 import { parseAppFile } from '@/lib/qa/app-file-parser';
 import type { QaPlatform, QaSourceType } from '@/lib/types';
 
@@ -35,8 +34,12 @@ export type AppUploadResult =
   | { ok: true; sourceRef: string; appInfo: AppInfoFields; binaryPath: string | null }
   | { ok: false; error: string };
 
-/** Directory where uploaded APK/IPA binaries are persisted for real-device installs. */
-export const QA_UPLOAD_DIR = path.join(os.tmpdir(), 'qa-app-uploads');
+/**
+ * Uploaded binaries are persisted here, outside git but inside the project
+ * directory (not the OS temp dir, which can be cleared on reboot) — a
+ * real-device install needs the actual file on disk, not just its metadata.
+ */
+export const QA_UPLOAD_DIR = path.join(process.cwd(), '.qa-uploads');
 
 /**
  * Real APK/AAB/IPA binary handling — extracts genuine package/version metadata
@@ -67,8 +70,8 @@ export async function handleAppFileUpload(sourceType: QaSourceType, formData: Fo
   let binaryPath: string | null = null;
   try {
     await fs.mkdir(QA_UPLOAD_DIR, { recursive: true });
-    const safeExt = expectedExt;
-    const dest = path.join(QA_UPLOAD_DIR, `${Date.now()}-${Math.random().toString(36).slice(2)}${safeExt}`);
+    const safeName = file.name.replace(/[^\w.-]/g, '_');
+    const dest = path.join(QA_UPLOAD_DIR, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`);
     await fs.writeFile(dest, buffer);
     binaryPath = dest;
   } catch (e) {

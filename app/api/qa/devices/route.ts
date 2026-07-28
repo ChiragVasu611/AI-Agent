@@ -1,17 +1,27 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth/session';
-import { getDeviceAdapter } from '@/lib/qa/device-adapter';
 import { connectWireless, pairWireless, disconnectWireless } from '@/lib/qa/adb';
+import { scanDevices } from '@/lib/qa/device-detect';
 
 export const runtime = 'nodejs';
+// Device state tracks physical hardware — never serve a cached scan.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
 
-  const adapter = getDeviceAdapter();
-  const [devices, configured] = await Promise.all([adapter.listDevices(), adapter.isConfigured()]);
-  return NextResponse.json({ devices, configured });
+  const scan = await scanDevices();
+  const online = scan.devices.filter((d) => d.state === 'online');
+
+  return NextResponse.json({
+    ...scan,
+    // `devices` keeps the full list so the UI can explain unauthorized/offline
+    // hardware; `online` is the subset actually usable for test execution.
+    online,
+    configured: scan.android.toolAvailable || scan.ios.toolAvailable,
+  }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
 /**

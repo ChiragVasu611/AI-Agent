@@ -7,7 +7,20 @@ const qaTestRunSchema = new Schema({
   status: { type: String, enum: ['queued', 'running', 'passed', 'failed', 'partial', 'cancelled'], default: 'queued', index: true },
   progress: { type: Number, default: 0 },
   sourceMode: { type: String, enum: ['catalog', 'uploaded'], default: 'catalog' },
-  engineMode: { type: String, enum: ['real_browser', 'real_device', 'simulated'], default: 'simulated' },
+  // 'blocked_no_runtime' = the artifact type has no executor attached (e.g. an
+  // APK with no Appium/device farm), so the run reported BLOCKED instead of
+  // inventing pass/fail results.
+  engineMode: { type: String, enum: ['real_browser', 'real_device', 'simulated', 'blocked_no_runtime'], default: 'simulated' },
+  // Serial of the device chosen on QA → Devices. A preference, not a hard
+  // requirement: if it is no longer attached the engine falls back to any
+  // authorized device and says so in the run log.
+  deviceSerial: { type: String, default: null },
+  // Live-preview fields: what the current step expected, what was actually
+  // observed, and whether it passed — surfaced during execution, not just in
+  // the final report.
+  currentExpected: { type: String, default: '' },
+  currentActual: { type: String, default: '' },
+  currentStepStatus: { type: String, enum: ['running', 'pass', 'fail', 'blocked', 'skipped'], default: 'running' },
 
   runNumber: { type: Number, required: true, index: true },
   runName: { type: String, default: '' },
