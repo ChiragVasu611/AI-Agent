@@ -7,6 +7,7 @@ import {
   tap, longPress, doubleTap, swipe, inputText, clearText, pressKey, setRotation, KEY,
 } from './device';
 import { waitForStableUi } from './smart-wait';
+import { isAdNode } from './ad-detector';
 
 /**
  * Interaction planning and execution.
@@ -84,6 +85,9 @@ export function planInteractions(
   const visible = state.nodes.filter(
     (n) => n.enabled
       && inApp(n)
+      // Never interact with an ad surface: tapping a banner/native ad opens the
+      // advertiser's browser or store page and takes the run out of the app.
+      && !isAdNode(n)
       && bw(n.bounds) > 0 && bh(n.bounds) > 0
       && n.bounds.top < state.screenHeight && n.bounds.bottom > 0,
   );

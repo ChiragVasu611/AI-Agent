@@ -54,7 +54,10 @@ export default function QaRunPage() {
   const router = useRouter();
   const runId = params.id as string;
   const [deleting, startDelete] = useTransition();
-  const [cancelling, startCancel] = useTransition();
+  const [, startCancel] = useTransition();
+  /** Set as soon as the user asks to stop, so the button can't be pressed twice
+   *  while the engine finishes its current step and reports back. */
+  const [stopping, setStopping] = useState(false);
   const [run, setRun] = useState<any>(null);
   const [logs, setLogs] = useState<any[]>([]);
   const [screenshots, setScreenshots] = useState<any[]>([]);
@@ -107,6 +110,10 @@ export default function QaRunPage() {
   }
 
   const isLive = run.status === 'running' || run.status === 'queued';
+  // The Stop control only makes sense once execution has actually started.
+  const isRunning = run.status === 'running';
+  // Disabled once a stop is requested here, or already recorded server-side.
+  const stopRequested = stopping || run.status === 'cancelled' || run.currentStep === 'Cancelling…';
 
   function onDelete() {
     if (!confirm(`Delete Run #${run.runNumber}? This removes its bugs, logs, screenshots, and test case results. This cannot be undone.`)) return;
@@ -119,8 +126,10 @@ export default function QaRunPage() {
 
   function onStop() {
     if (!confirm(`Stop Run #${run.runNumber}? The run will end now and any partial results collected so far are saved.`)) return;
+    setStopping(true);
     startCancel(async () => {
       const res = await cancelQaTestRun(runId);
+      if (res?.error) setStopping(false); // let the user retry if it didn't take
       if (res?.error) toast.error(res.error);
       else toast.success('Stopping run…');
     });
@@ -174,16 +183,18 @@ export default function QaRunPage() {
         {run.engineMode === 'real_browser' && <Badge variant="outline" className="text-[10px]">Real Browser Execution</Badge>}
         {isRealDevice && <Badge variant="outline" className="text-[10px]">Real Device Execution</Badge>}
         <Badge className={STATUS_COLOR[run.status]}>{run.status}</Badge>
-        {isLive && (
+        {/* Only shown once execution has actually started, and disabled as soon
+            as a stop has been requested so it can't be pressed twice. */}
+        {isRunning && (
           <Button
             size="sm"
             variant="outline"
             className="gap-1.5"
-            disabled={cancelling}
+            disabled={stopRequested}
             onClick={onStop}
           >
-            {cancelling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
-            Stop
+            {stopRequested ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+            {stopRequested ? 'Stopping…' : 'Stop'}
           </Button>
         )}
         <Button

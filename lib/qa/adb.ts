@@ -143,6 +143,21 @@ export async function installApk(serial: string, apkPath: string): Promise<{ ok:
   return { ok, message: out };
 }
 
+/**
+ * Wipes the app's data so an ALREADY-INSTALLED app starts from a clean slate:
+ * no cached session, no completed onboarding, no prior state. Without this a
+ * re-run of an installed app skips login/onboarding entirely and tests a
+ * completely different (already-signed-in) app than a first-time user sees.
+ *
+ * `pm clear` also revokes runtime permissions, so the engine re-exercises the
+ * real permission flows on every run.
+ */
+export async function clearAppData(serial: string, packageName: string): Promise<{ ok: boolean; message: string }> {
+  const res = await runAdb(['-s', serial, 'shell', 'pm', 'clear', packageName], 60_000);
+  const out = `${res.stdout} ${res.stderr}`.trim();
+  return { ok: /success/i.test(out), message: out };
+}
+
 /** Launches the app's default LAUNCHER activity via monkey. */
 export async function launchApp(serial: string, packageName: string): Promise<boolean> {
   const res = await runAdb(

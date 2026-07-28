@@ -4,7 +4,7 @@ import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { User } from '@/lib/mongodb/models/User';
 import { log } from '@/lib/qa/runtime-helpers';
 import { DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
-import { installApk } from '@/lib/qa/adb';
+import { installApk, clearAppData } from '@/lib/qa/adb';
 import type { QaCredentials } from './login-handler';
 
 import { profileDevice, forceStop, startAppTimed } from './device';
@@ -193,6 +193,17 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
   const install = await installApk(serial, apkPath);
   await emit(install.ok ? 'info' : 'error', `adb install: ${install.message.slice(0, 300)}`);
   if (!install.ok) return fail(`Install failed: ${install.message.slice(0, 300)}`);
+
+  // Always start from a FRESH app state. If the app was already installed, its
+  // data (session, completed onboarding, granted permissions, cached content)
+  // would otherwise carry over and the run would test an already-signed-in app
+  // instead of the real first-run experience.
+  await forceStop(serial, packageName);
+  const cleared = await clearAppData(serial, packageName);
+  await emit(cleared.ok ? 'info' : 'warn',
+    cleared.ok
+      ? 'Cleared existing app data — starting from a fresh install state.'
+      : `Could not clear app data (${cleared.message.slice(0, 120)}); continuing with existing state.`);
 
   // ------------------------------------------------------------- BASELINE
   await crashes.start();
