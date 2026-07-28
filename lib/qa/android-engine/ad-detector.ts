@@ -1,6 +1,6 @@
 import type { UiNode } from './types';
 import { centerOf, labelOf, visibleText, area, width as bw, height as bh } from './ui-parser';
-import { dumpHierarchy, tap, pressKey, KEY } from './device';
+import { dumpHierarchy, tap, pressKey, KEY, isAppForeground, startAppTimed } from './device';
 import { parseHierarchy } from './ui-parser';
 import { waitUntil, waitForStableUi } from './smart-wait';
 
@@ -58,6 +58,17 @@ export interface AdVerdict {
   reason: string;
   network: string | null;
   fullScreen: boolean;
+  /**
+   * True only when the ad actually BLOCKS the app — a full-screen interstitial,
+   * rewarded video, or app-open ad that must be dismissed to continue.
+   *
+   * An inline banner or native ad embedded in an otherwise usable app screen is
+   * `isAd: true, blocking: false`: it is recorded as evidence and its nodes are
+   * avoided, but the screen is still explored normally. Treating those as
+   * blocking is what previously made the engine hammer BACK on a perfectly good
+   * screen until it exited the app to the launcher.
+   */
+  blocking: boolean;
 }
 
 function sdkMatch(value: string): string | null {
@@ -74,28 +85,55 @@ function sdkMatch(value: string): string | null {
  */
 export function detectAd(nodes: UiNode[], activity: string, appPackage: string, w: number, h: number): AdVerdict {
   const screenArea = Math.max(1, w * h);
+  /** Largest area covered by any node matching an ad signal. */
+  const adSurfaceArea = (predicate: (n: UiNode) => boolean): number =>
+    nodes.filter(predicate).reduce((max, n) => Math.max(max, area(n.bounds)), 0);
+
+  /**
+   * The app's own screen is still usable when interactive, app-owned controls
+   * exist outside the ad surface. Interstitials cover everything; banners
+   * don't. This is the signal that separates "must dismiss" from "just avoid".
+   */
+  const appOwnedInteractive = nodes.filter(
+    (n) => n.enabled && (n.clickable || n.scrollable)
+      && (!n.packageName || n.packageName === appPackage)
+      && !AD_VIEW_CLASSES.test(n.className)
+      && !AD_ID_HINTS.test(n.resourceId)
+      && !sdkMatch(`${n.packageName}${n.className}${n.resourceId}`),
+  ).length;
+
+  // The activity itself being an ad activity is always blocking — the ad SDK
+  // owns the whole window at that point.
+  const activityIsAd = Boolean(sdkMatch(activity || '')) || AD_VIEW_CLASSES.test(activity || '');
 
   // 1. SDK signature anywhere in the hierarchy or the resolved activity.
-  const haystacks: string[] = [activity];
-  for (const n of nodes) {
-    haystacks.push(n.packageName, n.className, n.resourceId);
-  }
-  for (const value of haystacks) {
-    const net = sdkMatch(value || '');
-    if (net) {
-      const fullScreen = nodes.some((n) => area(n.bounds) > screenArea * 0.75 && sdkMatch(`${n.packageName}${n.className}${n.resourceId}`));
-      return { isAd: true, reason: `Ad SDK surface detected: ${net}`, network: net, fullScreen };
-    }
+  const sdkNode = nodes.find((n) => sdkMatch(`${n.packageName} ${n.className} ${n.resourceId}`));
+  const sdkNet = sdkMatch(activity || '') ?? (sdkNode ? sdkMatch(`${sdkNode.packageName} ${sdkNode.className} ${sdkNode.resourceId}`) : null);
+  if (sdkNet) {
+    const covered = adSurfaceArea((n) => Boolean(sdkMatch(`${n.packageName} ${n.className} ${n.resourceId}`)));
+    const fullScreen = covered > screenArea * 0.75;
+    return {
+      isAd: true,
+      reason: `Ad SDK surface detected: ${sdkNet}`,
+      network: sdkNet,
+      fullScreen,
+      // Blocking only when it owns the window, or covers most of the screen and
+      // leaves the app with no usable controls of its own.
+      blocking: activityIsAd || (fullScreen && appOwnedInteractive === 0),
+    };
   }
 
   // 2. Ad view classes (some networks obfuscate package but keep view names).
   const adView = nodes.find((n) => AD_VIEW_CLASSES.test(n.className));
   if (adView) {
+    const covered = area(adView.bounds);
+    const fullScreen = covered > screenArea * 0.75;
     return {
       isAd: true,
       reason: `Ad view class detected: ${adView.className}`,
       network: null,
-      fullScreen: area(adView.bounds) > screenArea * 0.6,
+      fullScreen,
+      blocking: activityIsAd || (fullScreen && appOwnedInteractive === 0),
     };
   }
 
@@ -103,7 +141,14 @@ export function detectAd(nodes: UiNode[], activity: string, appPackage: string, 
   //    a tiny "ad_label" text node must not flag the whole screen.
   const adId = nodes.find((n) => AD_ID_HINTS.test(n.resourceId) && area(n.bounds) > screenArea * 0.25);
   if (adId) {
-    return { isAd: true, reason: `Ad container id: ${adId.resourceId}`, network: null, fullScreen: area(adId.bounds) > screenArea * 0.7 };
+    const fullScreen = area(adId.bounds) > screenArea * 0.75;
+    return {
+      isAd: true,
+      reason: `Ad container id: ${adId.resourceId}`,
+      network: null,
+      fullScreen,
+      blocking: fullScreen && appOwnedInteractive === 0,
+    };
   }
 
   // 4. A near-fullscreen surface owned by a package other than the app under
@@ -120,11 +165,19 @@ export function detectAd(nodes: UiNode[], activity: string, appPackage: string, 
         reason: `Full-screen overlay owned by ${foreign.packageName}`,
         network: foreign.packageName,
         fullScreen: true,
+        blocking: true,
       };
     }
   }
 
-  return { isAd: false, reason: '', network: null, fullScreen: false };
+  return { isAd: false, reason: '', network: null, fullScreen: false, blocking: false };
+}
+
+/** True when a node is part of an ad surface — never tap these. */
+export function isAdNode(n: UiNode): boolean {
+  return Boolean(sdkMatch(`${n.packageName} ${n.className} ${n.resourceId}`))
+    || AD_VIEW_CLASSES.test(n.className)
+    || AD_ID_HINTS.test(n.resourceId);
 }
 
 /** Ranks candidate dismiss controls found in the live hierarchy. */
@@ -155,11 +208,15 @@ function findDismissControls(nodes: UiNode[], w: number, h: number): UiNode[] {
   return scored.sort((a, b) => b.score - a.score).map((s) => s.n);
 }
 
-/** True when the current hierarchy still shows an ad surface. */
+/**
+ * True when the hierarchy still shows a BLOCKING ad. An inline banner left on
+ * the screen does not count as "still blocked" — otherwise dismissal would
+ * loop forever on a screen that is perfectly usable.
+ */
 function stillAd(xml: string, appPackage: string, w: number, h: number): boolean {
   const { nodes } = parseHierarchy(xml);
   const activityGuess = '';
-  return detectAd(nodes, activityGuess, appPackage, w, h).isAd;
+  return detectAd(nodes, activityGuess, appPackage, w, h).blocking;
 }
 
 export interface AdDismissResult {
@@ -212,10 +269,22 @@ export async function dismissAd(
     }
   }
 
-  // System Back is the universal escape hatch.
+  // System Back is the universal escape hatch — but it can also back out of the
+  // app entirely. Press it ONCE, then make sure we're still in the app under
+  // test; if Back exited to the launcher, relaunch so the run continues instead
+  // of stranding the agent on the home screen.
   await pressKey(serial, KEY.BACK);
   attempts.push('pressed BACK');
   await waitForStableUi(serial, { timeoutMs: 3_500 });
+
+  if (!(await isAppForeground(serial, appPackage))) {
+    attempts.push('BACK exited the app — relaunching');
+    const relaunch = await startAppTimed(serial, appPackage);
+    attempts.push(relaunch.ok ? 'relaunched' : 'relaunch failed');
+    await waitForStableUi(serial, { timeoutMs: 4_000 });
+    return { dismissed: relaunch.ok, attempts, waitedMs: Date.now() - started };
+  }
+
   const after = await dumpHierarchy(serial);
   const dismissed = !after || !stillAd(after, appPackage, w, h);
 

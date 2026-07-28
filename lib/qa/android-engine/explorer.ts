@@ -100,7 +100,9 @@ export async function observeScreen(
     packageName: pkg,
     width: profile.width,
     height: profile.height,
-    adDetected: adVerdict.isAd,
+    // Only a blocking ad makes the SCREEN an ad; a banner inside a real screen
+    // must not relabel that screen (it would distort the feature map too).
+    adDetected: adVerdict.blocking,
   });
 
   return {
@@ -124,6 +126,8 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
   const blockers: Blocker[] = [];
   const coverageLimits: string[] = [];
   const seenSignatures = new Set<string>();
+  /** Screens whose inline (non-blocking) ad was already recorded — log once. */
+  const inlineAdsSeen = new Set<string>();
 
   let steps = 0;
   let adsDismissed = 0;
@@ -162,9 +166,19 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
       continue;
     }
 
-    // 2. Advertisements — wait adaptively for the dismiss control, then close.
+    // 2. Advertisements — only a BLOCKING ad (full-screen interstitial/rewarded
+    //    /app-open) is dismissed. An inline banner or native ad on an otherwise
+    //    usable screen is recorded and skipped over, and exploration continues
+    //    normally; treating those as blocking used to make the engine press
+    //    BACK until it left the app and sat on the home screen doing nothing.
     const ad = detectAd(state.nodes, state.activity, cfg.packageName, cfg.profile.width, cfg.profile.height);
-    if (ad.isAd) {
+    if (ad.isAd && !ad.blocking && !inlineAdsSeen.has(state.signature)) {
+      inlineAdsSeen.add(state.signature);
+      cfg.planner?.recordBlocker('ad', state.label);
+      await cfg.log('info', `Inline ad on "${state.label}" (${ad.reason}) — continuing to test the screen around it.`);
+      await cfg.screenshots.capture({ runId: cfg.runId, screenName: `Ad — ${state.label}`, reason: 'ad', step: ad.reason });
+    }
+    if (ad.blocking) {
       await cfg.log('info', `Advertisement detected (${ad.reason}). Waiting for a dismiss control…`);
       cfg.planner?.recordBlocker('ad', state.label);
       await cfg.screenshots.capture({ runId: cfg.runId, screenName: `Ad — ${state.label}`, reason: 'ad', step: ad.reason });
@@ -183,9 +197,15 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
       await cfg.log(res.dismissed ? 'info' : 'warn',
         res.dismissed ? `Ad dismissed after ${Math.round(res.waitedMs / 1000)}s.` : 'Could not dismiss the advertisement.');
       if (!res.dismissed) {
-        // Back out to avoid burning the whole budget on one ad.
-        await pressKey(cfg.serial, KEY.BACK);
+        // dismissAd already tried BACK (and relaunched if that exited the app).
+        // Pressing BACK again here is what used to walk the agent out to the
+        // launcher — instead, make sure the app is foreground and carry on.
         coverageLimits.push(`An advertisement on "${state.label}" could not be dismissed automatically.`);
+        if (!(await isAppForeground(cfg.serial, cfg.packageName))) {
+          await cfg.log('warn', 'Ad left the app in the background — relaunching to continue testing.');
+          const relaunch = await startAppTimed(cfg.serial, cfg.packageName);
+          if (!relaunch.ok) { terminationReason = 'app_gone'; break; }
+        }
       }
       steps += 1;
       continue;
