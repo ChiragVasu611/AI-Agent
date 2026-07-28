@@ -1,4 +1,5 @@
-import { Schema, model, models } from 'mongoose';
+import { Schema } from 'mongoose';
+import { defineModel } from '@/lib/mongodb/define-model';
 
 /**
  * Persistent application knowledge for the autonomous Android engine.
@@ -62,5 +63,4 @@ const qaAppKnowledgeSchema = new Schema(
 
 qaAppKnowledgeSchema.index({ userId: 1, packageName: 1 }, { unique: true });
 
-export const QaAppKnowledge =
-  models.QaAppKnowledge ?? model('QaAppKnowledge', qaAppKnowledgeSchema);
+export const QaAppKnowledge = defineModel('QaAppKnowledge', qaAppKnowledgeSchema);

@@ -1,4 +1,5 @@
-import { Schema, model, models } from 'mongoose';
+import { Schema } from 'mongoose';
+import { defineModel } from '@/lib/mongodb/define-model';
 
 const qaTestRunSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -44,4 +45,4 @@ const qaTestRunSchema = new Schema({
   resetAppData: { type: Boolean, default: false },
 }, { timestamps: true });
 
-export const QaTestRun = models.QaTestRun ?? model('QaTestRun', qaTestRunSchema);
+export const QaTestRun = defineModel('QaTestRun', qaTestRunSchema);

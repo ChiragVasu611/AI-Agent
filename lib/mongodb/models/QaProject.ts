@@ -1,4 +1,5 @@
-import { Schema, model, models } from 'mongoose';
+import { Schema } from 'mongoose';
+import { defineModel } from '@/lib/mongodb/define-model';
 
 const qaProjectSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -27,4 +28,4 @@ const qaProjectSchema = new Schema({
   binaryPath: { type: String, default: null },
 }, { timestamps: true });
 
-export const QaProject = models.QaProject ?? model('QaProject', qaProjectSchema);
+export const QaProject = defineModel('QaProject', qaProjectSchema);
