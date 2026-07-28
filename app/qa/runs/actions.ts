@@ -10,6 +10,8 @@ import { QaLogEntry } from '@/lib/mongodb/models/QaLogEntry';
 import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
 import { QaTestCaseResult } from '@/lib/mongodb/models/QaTestCaseResult';
 import { QaUploadedTestCase } from '@/lib/mongodb/models/QaUploadedTestCase';
+import { QaIssueBoard } from '@/lib/mongodb/models/QaIssueBoard';
+import { QaIssueCard } from '@/lib/mongodb/models/QaIssueCard';
 import { User } from '@/lib/mongodb/models/User';
 import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
 import { runQaTestExecution } from '@/lib/qa/engine';
@@ -134,6 +136,10 @@ export async function deleteQaTestRun(runId: string) {
     QaScreenshot.deleteMany({ runId }),
     QaTestCaseResult.deleteMany({ runId }),
     QaUploadedTestCase.deleteMany({ runId }),
+    // The AI Issue Board for this execution goes with it — a board whose
+    // execution no longer exists could never be reviewed or retested.
+    QaIssueCard.deleteMany({ runId }),
+    QaIssueBoard.deleteMany({ runId }),
   ]);
   await QaTestRun.deleteOne({ _id: runId });
 

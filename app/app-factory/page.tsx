@@ -15,6 +15,7 @@ import {
 import { toast } from 'sonner';
 import { AgentPipeline, RightPanel } from '@/components/modules/app-factory/agent-pipeline';
 import { DevicePanel } from '@/components/modules/app-factory/device-panel';
+import { IssueSummaryWidgets } from '@/components/modules/app-factory/issue-boards/issue-summary-widgets';
 import { cn } from '@/lib/utils';
 import type { Project } from '@/lib/types';
 
@@ -126,6 +127,9 @@ export default function AppFactoryPage() {
           </Badge>
         </div>
       </header>
+
+      {/* AI Issue Boards summary — added alongside the existing dashboard rows */}
+      <IssueSummaryWidgets />
 
       {/* Row 1 — Reference App + Device */}
       <div className="grid gap-6 xl:grid-cols-[1.6fr_1fr]">

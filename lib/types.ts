@@ -783,3 +783,142 @@ export interface SeoCompetitor {
   status: 'queued' | 'completed' | 'failed';
   createdAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// AI Issue Boards (AI App Factory) — one board per completed QA execution.
+// ---------------------------------------------------------------------------
+
+export type IssueBoardStatus = import('./issue-boards/constants').BoardStatus;
+export type IssueCardStatus = import('./issue-boards/constants').IssueStatus;
+export type IssueCategory = import('./issue-boards/constants').IssueCategory;
+
+export interface QaIssueBoard {
+  id: string;
+  ownerUserId: string;
+  runId: string;
+  projectId: string;
+  boardName: string;
+  projectName: string;
+  applicationName: string;
+  executionNumber: number;
+  executionId: string;
+  moduleType: QaRunSourceMode;
+  platform: string;
+  deviceName: string;
+  buildVersion: string;
+  executedByName: string;
+  executedAt: string | null;
+  runStatus: string;
+  totalCases: number;
+  passedCases: number;
+  failedCases: number;
+  blockedCases: number;
+  totalIssues: number;
+  status: IssueBoardStatus;
+  openIssues: number;
+  assignedIssues: number;
+  inProgressIssues: number;
+  readyForQaIssues: number;
+  reopenedIssues: number;
+  closedIssues: number;
+  criticalIssues: number;
+  highPriorityIssues: number;
+  assignedDevelopers: string[];
+  severities: string[];
+  priorities: string[];
+  lastActivityAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QaIssueComment {
+  id: string;
+  authorUserId: string | null;
+  authorName: string;
+  authorRole: string;
+  kind: 'qa' | 'developer' | 'note';
+  body: string;
+  mentions: string[];
+  attachments: Array<{ name: string; kind: string; dataUrl: string }>;
+  parentId: string | null;
+  createdAt: string;
+}
+
+export interface QaIssueActivity {
+  id: string;
+  type: import('./issue-boards/constants').IssueActivityType;
+  message: string;
+  fromStatus: string | null;
+  toStatus: string | null;
+  actorUserId: string | null;
+  actorName: string;
+  createdAt: string;
+}
+
+export interface QaIssueAttachment {
+  id: string;
+  name: string;
+  kind: string;
+  dataUrl: string;
+  addedByName: string;
+  createdAt: string;
+}
+
+export interface QaIssueCard {
+  id: string;
+  ownerUserId: string;
+  boardId: string;
+  runId: string;
+  projectId: string;
+  bugId: string | null;
+  sourceKey: string;
+  issueKey: string;
+  title: string;
+  description: string;
+  category: IssueCategory;
+  status: IssueCardStatus;
+  severity: QaSeverity;
+  priority: QaPriority;
+  labels: string[];
+  order: number;
+  assignedToUserId: string | null;
+  assignedToName: string;
+  assignedToEmail: string;
+  dueDate: string | null;
+  testCaseId: string;
+  module: string;
+  feature: string;
+  screenName: string;
+  failedStepNumber: number | null;
+  failedStepText: string;
+  expectedResult: string;
+  actualResult: string;
+  stepsToReproduce: string[];
+  executionNumber: number;
+  executionId: string;
+  projectName: string;
+  applicationName: string;
+  moduleType: string;
+  platform: string;
+  deviceName: string;
+  buildVersion: string;
+  screenshots: string[];
+  screenRecordingUrl: string | null;
+  logs: string;
+  stackTrace: string | null;
+  apiRequest: string | null;
+  apiResponse: string | null;
+  attachments: QaIssueAttachment[];
+  aiRootCause: string;
+  aiSuggestedFix: string;
+  comments: QaIssueComment[];
+  activity: QaIssueActivity[];
+  commentCount: number;
+  attachmentCount: number;
+  reopenCount: number;
+  firstAssignedAt: string | null;
+  readyForQaAt: string | null;
+  closedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}

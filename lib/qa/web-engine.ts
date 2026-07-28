@@ -7,6 +7,7 @@ import { QaBug } from '@/lib/mongodb/models/QaBug';
 import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
 import { QaTestCaseResult } from '@/lib/mongodb/models/QaTestCaseResult';
 import { sleep, log } from '@/lib/qa/runtime-helpers';
+import { onRunCompleted } from '@/lib/issue-boards/sync';
 import type { QaBugType, QaSeverity } from '@/lib/types';
 
 const NAV_TIMEOUT_MS = 25000;
@@ -504,6 +505,7 @@ export async function runWebTestExecution(runId: string) {
     run.completedAt = new Date();
     await run.save();
     await log(runId, 'error', 'error', run.errorMessage);
+    await onRunCompleted(runId);
     return;
   }
 
@@ -656,4 +658,5 @@ export async function runWebTestExecution(runId: string) {
   await run.save();
 
   await log(runId, 'automation', 'info', `Run completed: ${run.status.toUpperCase()} — ${passedCases}/${totalCases} checks passed across ${visited.size} page(s), avg load ${Math.round(avgLoadMs)}ms.`);
+  await onRunCompleted(runId);
 }
