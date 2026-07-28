@@ -44,7 +44,12 @@ export class AiPlanner {
   }) {
     this.apiKey = opts.apiKey;
     this.log = opts.log;
-    this.maxCalls = opts.maxCalls ?? 24;
+    // Each consultation is a blocking network round-trip inside the exploration
+    // loop, so the budget is deliberately small: on a real device an
+    // interaction step already costs seconds, and spending the run's clock on
+    // model latency buys fewer screens tested. The deterministic goal ranking
+    // handles every screen; the model only refines the genuinely ambiguous ones.
+    this.maxCalls = opts.maxCalls ?? 10;
     this.available = Boolean(opts.apiKey || process.env.OPENROUTER_API_KEY);
   }
 

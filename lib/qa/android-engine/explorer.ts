@@ -60,6 +60,14 @@ export interface ExplorerConfig {
   shouldCancel?: () => Promise<boolean>;
 }
 
+/**
+ * Most actions a single screen can receive before the explorer moves on. The
+ * planner ranks candidates first, so this keeps the highest-value interactions
+ * and drops the long tail of near-duplicate taps that would otherwise consume
+ * the run's whole time budget on one page.
+ */
+const MAX_ACTIONS_PER_SCREEN = 10;
+
 export interface Blocker {
   kind: 'ad' | 'paywall' | 'permission' | 'login';
   screen: string;
@@ -88,9 +96,28 @@ export async function observeScreen(
   const stable = await waitForStableUi(serial, { timeoutMs: 5_000 });
   const xml = stable.xml || (await dumpHierarchy(serial));
   if (!xml) return null;
+  const activity = stable.activity || (await focusedComponent(serial));
+  return buildScreenState(xml, activity, appPackage, profile);
+}
+
+/**
+ * Builds a ScreenState from a hierarchy that has ALREADY been dumped.
+ *
+ * Interactions settle the UI as part of executing, and that settle returns the
+ * hierarchy it used to decide the screen was stable. Re-dumping it just to build
+ * a ScreenState would pay the ~2s `uiautomator dump` cost twice per step, so the
+ * explorer reuses the settle's own output instead.
+ */
+export function buildScreenState(
+  xml: string,
+  activityIn: string,
+  appPackage: string,
+  profile: DeviceProfile,
+): ScreenState | null {
+  if (!xml) return null;
 
   const { root, nodes, rotation } = parseHierarchy(xml);
-  const activity = stable.activity || (await focusedComponent(serial));
+  const activity = activityIn;
   const pkg = nodes[0]?.packageName || appPackage;
 
   const adVerdict = detectAd(nodes, activity, appPackage, profile.width, profile.height);
@@ -128,6 +155,10 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
   const seenSignatures = new Set<string>();
   /** Screens whose inline (non-blocking) ad was already recorded — log once. */
   const inlineAdsSeen = new Set<string>();
+  /** Post-action observation reused as the next iteration's state (saves a dump). */
+  let carried: ScreenState | null = null;
+  /** Actions spent on each screen, so one busy page can't consume the whole run. */
+  const actionsOnScreen = new Map<string, number>();
 
   let steps = 0;
   let adsDismissed = 0;
@@ -143,7 +174,12 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
     if (cfg.shouldCancel && (await cfg.shouldCancel())) { terminationReason = 'cancelled'; break; }
 
     // ---------------------------------------------------------- OBSERVE
-    let state = await observeScreen(cfg.serial, cfg.packageName, cfg.profile);
+    // A `uiautomator dump` costs ~2s on a real device, so we never observe the
+    // same screen twice: the observation taken right after the previous action
+    // IS this iteration's state. Only paths that change the screen behind our
+    // back (blocker handling, backtracking) clear it and force a fresh dump.
+    let state = carried ?? await observeScreen(cfg.serial, cfg.packageName, cfg.profile);
+    carried = null;
     if (!state) {
       await cfg.log('warn', 'UI hierarchy unavailable — retrying.');
       steps += 1;
@@ -354,7 +390,21 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
     // enumerated candidates it returns act / backtrack / stop. The explorer
     // only performs the mechanical device work each decision implies. Without a
     // planner it falls back to the original graph-driven DFS.
-    const pending = actions.filter((a) => node.pendingActions.has(a.key));
+    let pending = actions.filter((a) => node.pendingActions.has(a.key));
+
+    // Per-screen action budget. Exhaustively tapping every control on a busy
+    // page (feeds and settings screens routinely expose 30–50) would consume the
+    // entire run on one screen and never reach the app's other features. Once the
+    // budget is spent the remaining actions are retired so the planner moves on
+    // toward unmet goals — the highest-value ones ran first, because the planner
+    // ranks before we spend any of the budget.
+    const spent = actionsOnScreen.get(state.signature) ?? 0;
+    if (pending.length > 0 && spent >= MAX_ACTIONS_PER_SCREEN) {
+      for (const a of pending) graph.markTried(state.signature, a.key);
+      await cfg.log('debug',
+        `"${state.label}": per-screen budget of ${MAX_ACTIONS_PER_SCREEN} action(s) spent — moving on to unmet goals.`);
+      pending = [];
+    }
 
     let action: Interaction | null = null;
     let decisionNote = '';
@@ -407,6 +457,7 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
     // ------------------------------------------------------------- ACT
     if (!action) continue; // unreachable, but keeps the type checker honest
     graph.markTried(state.signature, action.key);
+    actionsOnScreen.set(state.signature, (actionsOnScreen.get(state.signature) ?? 0) + 1);
 
     await cfg.log('debug', `${decisionNote} → ${action.reason} on "${state.label}"`);
     const before = state.signature;
@@ -420,10 +471,20 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
     }
 
     // ------------------------------------------------------- OBSERVE RESULT
-    const after = await observeScreen(cfg.serial, cfg.packageName, cfg.profile);
+    // The interaction already settled the UI and handed back the hierarchy it
+    // settled on — build the post-action state from that rather than paying for
+    // another dump. Only fall back to a fresh observation if it wasn't captured.
+    // Both parts are required: screen signatures are keyed on the activity, so
+    // reusing a settle that timed out before resolving one would collapse
+    // distinct screens onto the same graph node.
+    const after = exec.settledXml && exec.settledActivity
+      ? buildScreenState(exec.settledXml, exec.settledActivity, cfg.packageName, cfg.profile)
+      : await observeScreen(cfg.serial, cfg.packageName, cfg.profile);
     const navigated = !!after && after.signature !== before;
     graph.addEdge(before, after?.signature ?? before, action.key, navigated);
     cfg.planner?.recordResult(state, action, navigated);
+    // Reuse this observation next iteration instead of dumping the screen again.
+    carried = after;
 
     if (navigated && after) {
       await cfg.screenshots.capture({

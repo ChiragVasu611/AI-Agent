@@ -61,16 +61,52 @@ export async function profileDevice(serial: string): Promise<DeviceProfile> {
  * (no file I/O on device); falls back to dumping to a file and cat-ing it,
  * which some OEM builds require.
  */
-export async function dumpHierarchy(serial: string): Promise<string> {
-  const direct = await runAdb(['-s', serial, 'exec-out', 'uiautomator', 'dump', '/dev/tty'], 20_000);
-  if (direct.ok && direct.stdout.includes('<hierarchy')) return direct.stdout;
+/**
+ * Which dump strategy works on a given device, remembered after the first
+ * successful attempt.
+ *
+ * `uiautomator dump` costs ~2s per call on a real device, and on many OEM builds
+ * the /dev/tty variant produces nothing at all — so blindly trying it first
+ * DOUBLED the cost of every dump. Since a dump happens several times per
+ * exploration step, that wasted seconds on every single action. We probe once
+ * per device, then always use the method that actually works.
+ */
+const dumpStrategy = new Map<string, 'tty' | 'file'>();
 
-  const viaFile = await shell(
+async function dumpViaTty(serial: string): Promise<string> {
+  const res = await runAdb(['-s', serial, 'exec-out', 'uiautomator', 'dump', '/dev/tty'], 20_000);
+  return res.ok && res.stdout.includes('<hierarchy') ? res.stdout : '';
+}
+
+async function dumpViaFile(serial: string): Promise<string> {
+  const out = await shell(
     serial,
     'uiautomator dump /sdcard/qa-ui.xml >/dev/null 2>&1 && cat /sdcard/qa-ui.xml',
     25_000,
   );
-  return viaFile.includes('<hierarchy') ? viaFile : '';
+  return out.includes('<hierarchy') ? out : '';
+}
+
+export async function dumpHierarchy(serial: string): Promise<string> {
+  const known = dumpStrategy.get(serial);
+
+  if (known === 'file') return dumpViaFile(serial);
+  if (known === 'tty') {
+    const out = await dumpViaTty(serial);
+    // A previously-working method can still fail mid-transition; fall back once
+    // without discarding what we learned about the device.
+    return out || dumpViaFile(serial);
+  }
+
+  // First dump for this device — probe, then remember the winner.
+  const tty = await dumpViaTty(serial);
+  if (tty) {
+    dumpStrategy.set(serial, 'tty');
+    return tty;
+  }
+  const file = await dumpViaFile(serial);
+  if (file) dumpStrategy.set(serial, 'file');
+  return file;
 }
 
 /** Fully-qualified focused component, e.g. "com.app/.ui.MainActivity". */

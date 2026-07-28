@@ -7,7 +7,7 @@ import {
   tap, longPress, doubleTap, swipe, inputText, clearText, pressKey, setRotation, KEY,
 } from './device';
 import { waitForStableUi } from './smart-wait';
-import { isAdNode } from './ad-detector';
+import { isAdNode, adRegions, isInsideAdRegion } from './ad-detector';
 
 /**
  * Interaction planning and execution.
@@ -82,12 +82,17 @@ export function planInteractions(
     return p === '' || p.startsWith(opts.appPackage);
   };
 
+  // Ad containers on this screen. Anything geometrically inside one is off
+  // limits — native ads and WebView banners nest ordinary-looking views that
+  // carry no ad signature themselves, and tapping one opens the advertiser's
+  // browser or store page and drags the run out of the app.
+  const adZones = adRegions(state.nodes);
+
   const visible = state.nodes.filter(
     (n) => n.enabled
       && inApp(n)
-      // Never interact with an ad surface: tapping a banner/native ad opens the
-      // advertiser's browser or store page and takes the run out of the app.
       && !isAdNode(n)
+      && !isInsideAdRegion(n, adZones)
       && bw(n.bounds) > 0 && bh(n.bounds) > 0
       && n.bounds.top < state.screenHeight && n.bounds.bottom > 0,
   );
@@ -133,7 +138,31 @@ export function planInteractions(
     .filter(({ label }) => (opts.allowPurchase || !PURCHASE.test(label)) && !EXTERNAL.test(label))
     .sort((a, b) => b.score - a.score);
 
+  // Collapse repeated list rows. A feed renders the same row template dozens of
+  // times; enumerating every one floods the candidate list with interchangeable
+  // taps, which both looks like random clicking and starves the rest of the app
+  // of the run's time budget.
+  //
+  // Only templates that repeat MANY times are treated as a list — a handful of
+  // controls sharing a class (a "Settings"/"Profile"/"Help" menu) are all kept,
+  // since those are genuinely different features.
+  const templateTotal = new Map<string, number>();
   for (const { n } of ranked) {
+    const t = `${n.className}|${shortId(n)}`;
+    templateTotal.set(t, (templateTotal.get(t) ?? 0) + 1);
+  }
+  const REPEAT_THRESHOLD = 4;   // at/above this a template is a repeating list row
+  const SAMPLES_PER_LIST = 2;   // tapping two rows exercises the row template
+
+  const templateUsed = new Map<string, number>();
+  for (const { n } of ranked) {
+    const template = `${n.className}|${shortId(n)}`;
+    if ((templateTotal.get(template) ?? 0) >= REPEAT_THRESHOLD) {
+      const used = templateUsed.get(template) ?? 0;
+      if (used >= SAMPLES_PER_LIST) continue;
+      templateUsed.set(template, used + 1);
+    }
+
     push({
       kind: 'tap',
       target: n,
@@ -183,6 +212,14 @@ export function planInteractions(
 export interface ExecutionResult {
   ok: boolean;
   note: string;
+  /**
+   * The settled hierarchy observed after the gesture, when one was captured.
+   * Callers reuse this instead of dumping the screen again — a dump costs ~2s
+   * on a real device, so re-deriving what the settle already knows would double
+   * the cost of every step.
+   */
+  settledXml?: string;
+  settledActivity?: string;
 }
 
 /** Executes one planned interaction against the device. */
@@ -305,6 +342,7 @@ export async function performAndSettle(
   action: Interaction,
 ): Promise<ExecutionResult> {
   const res = await executeInteraction(serial, state, action);
-  if (res.ok) await waitForStableUi(serial, { timeoutMs: 6_000 });
-  return res;
+  if (!res.ok) return res;
+  const settled = await waitForStableUi(serial, { timeoutMs: 6_000 });
+  return { ...res, settledXml: settled.xml, settledActivity: settled.activity };
 }

@@ -8,8 +8,18 @@ import { parseHierarchy, visibleText } from './ui-parser';
  * Every wait is bounded so a permanently-animating screen cannot hang a run.
  */
 
-const POLL_MS = 220;
-const DEFAULT_STABLE_POLLS = 2;
+/**
+ * Poll pacing.
+ *
+ * A single `uiautomator dump` costs ~2s on a real device, so the number of polls
+ * — not the delay between them — is what determines how long a settle takes.
+ * One confirming poll (i.e. two dumps: observe, then confirm unchanged) is
+ * enough to establish the screen has stopped changing, and halves the cost of
+ * every settle versus requiring two consecutive confirmations. The inter-poll
+ * delay is small because the dump itself already paces the loop.
+ */
+const POLL_MS = 120;
+const DEFAULT_STABLE_POLLS = 1;
 const DEFAULT_TIMEOUT_MS = 6_000;
 
 /** Tiny yield used only between polls — never as a substitute for a real signal. */
@@ -79,7 +89,6 @@ export async function waitForStableUi(
 
   while (Date.now() - started < timeoutMs) {
     xml = await dumpHierarchy(serial);
-    activity = await focusedComponent(serial);
 
     if (!xml) {
       // Hierarchy unavailable (mid-transition or secure window) — keep polling.
@@ -90,19 +99,29 @@ export async function waitForStableUi(
 
     const sig = snapshotSignature(xml);
     const busy = opts.ignoreBusy ? false : looksBusy(xml);
-    const unchanged = sig === lastSig && activity === lastActivity;
 
-    if (unchanged && !busy) {
-      stable += 1;
-      if (stable >= need) {
-        return { xml, activity, settled: true, waitedMs: Date.now() - started };
+    // The focused activity is only read when the hierarchy itself looks settled.
+    // Reading it on every poll added a `dumpsys window` round-trip per poll for
+    // information that only matters at the moment we decide we're stable.
+    if (sig === lastSig && !busy) {
+      activity = await focusedComponent(serial);
+      // First read has nothing to compare against, so it cannot itself signal
+      // instability — otherwise every settle would cost an extra full dump.
+      const activityStable = lastActivity === '' || activity === lastActivity;
+      lastActivity = activity;
+      if (activityStable) {
+        stable += 1;
+        if (stable >= need) {
+          return { xml, activity, settled: true, waitedMs: Date.now() - started };
+        }
+      } else {
+        stable = 0;
       }
     } else {
       stable = 0;
     }
 
     lastSig = sig;
-    lastActivity = activity;
     await delay(POLL_MS);
   }
 

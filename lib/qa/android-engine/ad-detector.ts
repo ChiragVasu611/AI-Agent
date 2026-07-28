@@ -1,4 +1,4 @@
-import type { UiNode } from './types';
+import type { Bounds, UiNode } from './types';
 import { centerOf, labelOf, visibleText, area, width as bw, height as bh } from './ui-parser';
 import { dumpHierarchy, tap, pressKey, KEY, isAppForeground, startAppTimed } from './device';
 import { parseHierarchy } from './ui-parser';
@@ -173,11 +173,33 @@ export function detectAd(nodes: UiNode[], activity: string, appPackage: string, 
   return { isAd: false, reason: '', network: null, fullScreen: false, blocking: false };
 }
 
-/** True when a node is part of an ad surface — never tap these. */
+/** True when a node itself carries an ad signature. */
 export function isAdNode(n: UiNode): boolean {
   return Boolean(sdkMatch(`${n.packageName} ${n.className} ${n.resourceId}`))
     || AD_VIEW_CLASSES.test(n.className)
     || AD_ID_HINTS.test(n.resourceId);
+}
+
+/**
+ * Bounding boxes of every ad container on the screen.
+ *
+ * Signature matching alone is not enough to avoid tapping ads: a native ad or a
+ * WebView-rendered banner puts plain FrameLayouts/TextViews/ImageViews (no
+ * ad-ish class or resource-id) INSIDE an ad container. Those children look like
+ * ordinary app controls, and tapping one opens the advertiser's browser or store
+ * page. Excluding anything geometrically inside an ad container catches them all.
+ */
+export function adRegions(nodes: UiNode[]): Bounds[] {
+  return nodes
+    .filter((n) => isAdNode(n) && area(n.bounds) > 0)
+    .map((n) => n.bounds);
+}
+
+/** True when the node's centre falls inside any ad region — never tap these. */
+export function isInsideAdRegion(n: UiNode, regions: Bounds[]): boolean {
+  if (regions.length === 0) return false;
+  const c = centerOf(n.bounds);
+  return regions.some((r) => c.x >= r.left && c.x <= r.right && c.y >= r.top && c.y <= r.bottom);
 }
 
 /** Ranks candidate dismiss controls found in the live hierarchy. */
