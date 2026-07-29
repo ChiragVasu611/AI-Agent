@@ -14,7 +14,7 @@ const MODULES = [
     desc: 'Drop a reference app URL and let 8 autonomous agents build, test, and ship an APK.',
     href: '/app-factory',
     icon: Bot,
-    accent: 'from-sky-500/20 to-blue-500/5',
+    accent: 'from-indigo-500/20 to-violet-500/5',
     status: 'live' as const,
   },
   {

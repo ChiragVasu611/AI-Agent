@@ -29,7 +29,7 @@ const STATUS_BADGE: Record<string, string> = {
   fail: 'bg-red-500/15 text-red-500 border-red-500/30',
   blocked: 'bg-amber-500/15 text-amber-500 border-amber-500/30',
   skipped: 'bg-secondary text-muted-foreground',
-  pending: 'bg-sky-500/15 text-sky-500 border-sky-500/30',
+  pending: 'bg-primary/10 text-primary border-primary/25',
 };
 
 function elapsedLabel(startedAt: string | null): string {
@@ -253,7 +253,7 @@ export default function QaRunPage() {
               <div className="flex items-center gap-1.5"><XCircle className="h-3.5 w-3.5 text-red-500" /><div><div className="text-muted-foreground">Failed</div><div className="font-medium">{run.failedCases}</div></div></div>
               <div className="flex items-center gap-1.5"><ShieldAlert className="h-3.5 w-3.5 text-amber-500" /><div><div className="text-muted-foreground">Blocked</div><div className="font-medium">{run.blockedCases}</div></div></div>
               <div className="flex items-center gap-1.5"><SkipForward className="h-3.5 w-3.5 text-muted-foreground" /><div><div className="text-muted-foreground">Skipped</div><div className="font-medium">{run.skippedCases}</div></div></div>
-              <div className="flex items-center gap-1.5"><Hourglass className="h-3.5 w-3.5 text-sky-500" /><div><div className="text-muted-foreground">ETA</div><div className="font-medium">{run.etaSeconds != null ? `${run.etaSeconds}s` : '—'}</div></div></div>
+              <div className="flex items-center gap-1.5"><Hourglass className="h-3.5 w-3.5 text-primary" /><div><div className="text-muted-foreground">ETA</div><div className="font-medium">{run.etaSeconds != null ? `${run.etaSeconds}s` : '—'}</div></div></div>
             </div>
           )}
         </Card>

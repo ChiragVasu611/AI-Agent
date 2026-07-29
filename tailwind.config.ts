@@ -24,6 +24,17 @@ const config: Config = {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
+        xl: 'calc(var(--radius) + 4px)',
+      },
+      // Soft, ink-tinted elevation for the Modern SaaS surface style. Overrides
+      // Tailwind's default grey shadows globally, so every `shadow-sm/md/lg`
+      // (and the Card primitive) picks up the refined look automatically.
+      boxShadow: {
+        sm: '0 1px 2px 0 hsl(234 24% 14% / 0.05)',
+        DEFAULT: '0 1px 3px 0 hsl(234 24% 14% / 0.08), 0 1px 2px -1px hsl(234 24% 14% / 0.06)',
+        md: '0 4px 14px -2px hsl(234 24% 14% / 0.10)',
+        lg: '0 12px 32px -8px hsl(243 60% 40% / 0.16)',
+        xl: '0 24px 48px -12px hsl(243 60% 40% / 0.20)',
       },
       colors: {
         background: 'hsl(var(--background))',

@@ -18,7 +18,7 @@ const STATUS_STYLES: Record<string, string> = {
   passed: 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30',
   failed: 'bg-red-500/15 text-red-500 border-red-500/30',
   partial: 'bg-amber-500/15 text-amber-500 border-amber-500/30',
-  running: 'bg-blue-500/15 text-blue-500 border-blue-500/30',
+  running: 'bg-primary/10 text-primary border-primary/25',
   queued: 'bg-muted text-muted-foreground border-border',
   cancelled: 'bg-muted text-muted-foreground border-border',
 };
@@ -28,7 +28,7 @@ const SEVERITY_STYLES: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-500 border-red-500/30',
   high: 'bg-orange-500/15 text-orange-500 border-orange-500/30',
   medium: 'bg-amber-500/15 text-amber-500 border-amber-500/30',
-  low: 'bg-sky-500/15 text-sky-500 border-sky-500/30',
+  low: 'bg-primary/10 text-primary border-primary/25',
 };
 
 function formatDuration(seconds: number | null) {

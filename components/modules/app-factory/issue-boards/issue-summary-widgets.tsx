@@ -25,7 +25,7 @@ interface Stats {
 
 const TILES: Array<{ key: keyof Stats; label: string; icon: typeof KanbanSquare; tone: string }> = [
   { key: 'totalBoards', label: 'Total Boards', icon: KanbanSquare, tone: 'text-primary bg-primary/10' },
-  { key: 'openIssues', label: 'Open Issues', icon: ClipboardList, tone: 'text-sky-500 bg-sky-500/10' },
+  { key: 'openIssues', label: 'Open Issues', icon: ClipboardList, tone: 'text-primary bg-primary/10' },
   { key: 'assigned', label: 'Assigned', icon: UserCheck, tone: 'text-violet-500 bg-violet-500/10' },
   { key: 'inProgress', label: 'In Progress', icon: Hammer, tone: 'text-amber-500 bg-amber-500/10' },
   { key: 'readyForQa', label: 'Ready for QA', icon: TestTube2, tone: 'text-cyan-500 bg-cyan-500/10' },

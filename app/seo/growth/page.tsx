@@ -12,7 +12,7 @@ const SEVERITY_STYLES: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-500 border-red-500/30',
   high: 'bg-orange-500/15 text-orange-500 border-orange-500/30',
   medium: 'bg-amber-500/15 text-amber-500 border-amber-500/30',
-  low: 'bg-sky-500/15 text-sky-500 border-sky-500/30',
+  low: 'bg-primary/10 text-primary border-primary/25',
 };
 
 function TaskList({ tasks, projectById, emptyText }: { tasks: any[]; projectById: Map<string, string>; emptyText: string }) {

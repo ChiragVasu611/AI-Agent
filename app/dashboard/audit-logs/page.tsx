@@ -22,7 +22,7 @@ const MODULE_COLORS: Record<string, string> = {
   qa: 'bg-emerald-500/15 text-emerald-500',
   designer: 'bg-cyan-500/15 text-cyan-500',
   admin: 'bg-red-500/15 text-red-500',
-  app_factory: 'bg-sky-500/15 text-sky-500',
+  app_factory: 'bg-primary/10 text-primary',
 };
 
 export default async function AdminAuditLogsPage({

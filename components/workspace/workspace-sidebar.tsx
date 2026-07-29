@@ -35,7 +35,9 @@ export function WorkspaceSidebar({ workspaceKey }: { workspaceKey: keyof typeof 
                 href={item.href}
                 className={cn(
                   'group flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition',
-                  active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                  active
+                    ? 'bg-primary/10 font-medium text-primary shadow-sm ring-1 ring-inset ring-primary/15'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
                 )}
               >
                 <item.icon className="h-4 w-4" />
@@ -60,7 +62,9 @@ export function WorkspaceSidebar({ workspaceKey }: { workspaceKey: keyof typeof 
           href={settingsHref}
           className={cn(
             'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition',
-            settingsActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+            settingsActive
+              ? 'bg-primary/10 font-medium text-primary shadow-sm ring-1 ring-inset ring-primary/15'
+              : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
           )}
         >
           <Settings className="h-4 w-4" />

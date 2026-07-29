@@ -78,7 +78,7 @@ const STATUS_BADGE: Record<string, string> = {
   fail: 'bg-red-500/15 text-red-500 border-red-500/30',
   blocked: 'bg-amber-500/15 text-amber-500 border-amber-500/30',
   skipped: 'bg-secondary text-muted-foreground',
-  pending: 'bg-sky-500/15 text-sky-500 border-sky-500/30',
+  pending: 'bg-primary/10 text-primary border-primary/25',
 };
 
 const STATUS_DOT: Record<string, string> = {
