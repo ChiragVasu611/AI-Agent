@@ -3,18 +3,18 @@
 import { useEffect, useMemo, useState, useTransition } from 'react';
 import Link from 'next/link';
 import {
-  Battery, Bug as BugIcon, CheckCircle2, Clock, Copy, Cpu,
-  Download, ExternalLink, FileSpreadsheet, Globe, Hourglass, Loader2,
-  MemoryStick, Play, RefreshCw, ScrollText, Search, ShieldAlert, Signal,
-  SkipForward, Smartphone, Terminal, Timer, UploadCloud, Wifi, XCircle,
+  Bug as BugIcon, CheckCircle2, Clock, Copy,
+  Download, ExternalLink, FileSpreadsheet, Globe, Loader2,
+  Play, RefreshCw, ScrollText, Search, ShieldAlert, Square,
+  SkipForward, Smartphone, Terminal, Timer, UploadCloud, XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { startUploadedTestExecution } from '@/app/qa/actions';
+import { cancelQaTestRun } from '@/app/qa/runs/actions';
 import { submitBinaryRun } from '@/lib/qa/submit-binary-run';
 import { attachSelectedDevice } from '@/lib/qa/selected-device';
 import { SelectedDeviceBanner } from '@/components/modules/qa/selected-device-banner';
 import { exportCsv, exportExcel } from '@/lib/qa/export';
-import { type SheetPreview } from '@/lib/qa/sheet-preview';
 import { TestCaseSheetModal } from '@/components/modules/qa/test-case-sheet-modal';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -239,6 +239,8 @@ function LogFeed({ logs, autoScroll }: { logs: any[]; autoScroll: boolean }) {
 
 export default function TestCaseExecutionPage() {
   const [pending, startTransition] = useTransition();
+  const [stopping, setStopping] = useState(false);
+  const [, startCancel] = useTransition();
   const [platform, setPlatform] = useState<Platform>('android');
   // Android/iOS each offer two ways to supply the app: a store URL, or a
   // direct binary upload. Web has only a URL — no mode toggle needed.
@@ -247,7 +249,6 @@ export default function TestCaseExecutionPage() {
   const [fileName, setFileName] = useState('');
   const [appFileName, setAppFileName] = useState('');
   const [detectedMobileType, setDetectedMobileType] = useState<'apk' | 'aab' | 'ipa' | null>(null);
-  const [sheetPreview, setSheetPreview] = useState<SheetPreview | null>(null);
   const [sheetPreviewError, setSheetPreviewError] = useState<string | null>(null);
   const [repositoryModalOpen, setRepositoryModalOpen] = useState(false);
   const [selectedSheet, setSelectedSheet] = useState<{ id: string; sheetName: string; versionLabel: string; totalTestCases: number } | null>(null);
@@ -315,24 +316,13 @@ export default function TestCaseExecutionPage() {
   async function onRepositorySheetSelected(sheet: { id: string; sheetName: string; versionIndex: number; versionLabel: string; totalTestCases: number }) {
     setSelectedSheet({ id: sheet.id, sheetName: sheet.sheetName, versionLabel: sheet.versionLabel, totalTestCases: sheet.totalTestCases });
     setFileName(sheet.sheetName);
-    setSheetPreview(null);
     setSheetPreviewError(null);
     try {
       const res = await fetch(`/api/qa/sheets/${sheet.id}`);
       const data = await res.json();
-      if (data.error) { setSheetPreviewError(data.error); return; }
-      const idx = data.sheet.currentVersionIndex ?? data.sheet.versions.length - 1;
-      const rows = data.sheet.versions[idx]?.rows ?? [];
-      const modules = Array.from(new Set(rows.map((r: any) => r.module).filter(Boolean))) as string[];
-      setSheetPreview({
-        headers: ['TC ID', 'Module', 'Test Case', 'Steps', 'Expected Result'],
-        headerMapping: ['TC ID', 'Module', 'Test Case', 'Steps', 'Expected Result'].map((h) => ({ column: h, mapsTo: h })),
-        rows: rows.slice(0, 5).map((r: any) => [r.testCaseId, r.module, r.scenario, r.steps.join(' | '), r.expectedResult]),
-        totalRows: rows.length,
-        modules,
-      });
+      if (data.error) setSheetPreviewError(data.error);
     } catch {
-      setSheetPreviewError('Could not load a preview for this sheet — it will still be validated when execution starts.');
+      setSheetPreviewError('Could not load this sheet — it will still be validated when execution starts.');
     }
   }
 
@@ -397,8 +387,6 @@ export default function TestCaseExecutionPage() {
       setRunId(res.runId ?? null);
     });
   }
-
-  const isLive = run && (run.status === 'running' || run.status === 'queued');
 
   const moduleOptions = useMemo(
     () => Array.from(new Set(testCases.map((t) => t.module).filter(Boolean))).sort(),
@@ -485,6 +473,35 @@ export default function TestCaseExecutionPage() {
 
   const configReady = fileName && (isBinarySource ? !!detectedMobileType : true);
 
+  // The Stop control only makes sense once execution has actually started,
+  // and is disabled as soon as a stop has been requested (locally, or already
+  // recorded server-side) so it can't be pressed twice.
+  const isRunning = run?.status === 'running';
+  const stopRequested = stopping || run?.status === 'cancelled' || run?.currentStep === 'Cancelling…';
+  // Once a run reaches any terminal state, the config form (and its Start
+  // Execution button) stays hidden forever with no way back — this is exactly
+  // what reads as "the button stopped working". Offer an explicit reset.
+  const runIsTerminal = run && ['passed', 'failed', 'partial', 'cancelled'].includes(run.status);
+
+  function onNewExecution() {
+    setRunId(null);
+    setRun(null);
+    setLogs([]);
+    setScreenshots([]);
+    setBugs([]);
+    setTestCases([]);
+  }
+
+  function onStop() {
+    if (!runId) return;
+    if (!confirm('Stop this execution? It will end now and any partial results collected so far are saved.')) return;
+    setStopping(true);
+    startCancel(async () => {
+      const res = await cancelQaTestRun(runId);
+      if (res?.error) { setStopping(false); toast.error(res.error); } else toast.success('Stopping run…');
+    });
+  }
+
   return (
     <div className="mx-auto max-w-[1800px] space-y-4 p-4 lg:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -498,6 +515,17 @@ export default function TestCaseExecutionPage() {
           <div className="flex items-center gap-2">
             <span className={cn('h-2 w-2 rounded-full', RUN_STATUS_DOT[run.status])} />
             <Badge className={RUN_STATUS_COLOR[run.status] ?? ''}>{run.status}</Badge>
+            {isRunning && (
+              <Button size="sm" variant="outline" className="gap-1.5" disabled={stopRequested} onClick={onStop}>
+                {stopRequested ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+                {stopRequested ? 'Stopping…' : 'Stop Execution'}
+              </Button>
+            )}
+            {runIsTerminal && (
+              <Button size="sm" className="gap-1.5" onClick={onNewExecution}>
+                <RefreshCw className="h-3.5 w-3.5" /> New Execution
+              </Button>
+            )}
             <Link href={`/qa/runs/${runId}`} className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
               Full Run Page <ExternalLink className="h-3 w-3" />
             </Link>
@@ -670,10 +698,10 @@ export default function TestCaseExecutionPage() {
                       isDraggingSheet ? 'border-primary bg-primary/5 text-primary' : 'border-border text-muted-foreground hover:bg-secondary/40',
                     )}
                   >
-                    <FileSpreadsheet className="h-5 w-5 flex-shrink-0" />
+                    {!selectedSheet && <FileSpreadsheet className="h-5 w-5 flex-shrink-0" />}
                     {selectedSheet ? (
                       <span className="flex flex-col items-start truncate text-left text-foreground">
-                        <span className="flex items-center gap-1.5 truncate"><FileSpreadsheet className="h-3.5 w-3.5" /> {selectedSheet.sheetName}</span>
+                        <span className="flex items-center gap-1.5 truncate"><FileSpreadsheet className="h-3.5 w-3.5 flex-shrink-0" /> {selectedSheet.sheetName}</span>
                         <span className="text-[10px] text-muted-foreground">{selectedSheet.versionLabel} · {selectedSheet.totalTestCases} test case(s) · click to change</span>
                       </span>
                     ) : isDraggingSheet ? (
@@ -687,49 +715,6 @@ export default function TestCaseExecutionPage() {
                   </p>
 
                   {sheetPreviewError && <p className="text-[11px] text-destructive">{sheetPreviewError}</p>}
-
-                  {sheetPreview && (
-                    <div className="space-y-3 rounded-lg border border-border p-3">
-                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                        <div><div className="text-[10px] text-muted-foreground">Test Case Count</div><div className="text-sm font-semibold">{sheetPreview.totalRows}</div></div>
-                        <div><div className="text-[10px] text-muted-foreground">Scenario Count</div><div className="text-sm font-semibold">{sheetPreview.totalRows}</div></div>
-                        <div><div className="text-[10px] text-muted-foreground">Modules Detected</div><div className="text-sm font-semibold">{sheetPreview.modules.length}</div></div>
-                      </div>
-
-                      <div>
-                        <div className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Header Mapping</div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {sheetPreview.headerMapping.map((h, i) => (
-                            <Badge key={i} variant={h.mapsTo ? 'secondary' : 'outline'} className="text-[10px]">
-                              {h.column} {h.mapsTo ? `→ ${h.mapsTo}` : '(unmapped)'}
-                            </Badge>
-                          ))}
-                        </div>
-                      </div>
-
-                      {sheetPreview.rows.length > 0 && (
-                        <div>
-                          <div className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Sheet Preview</div>
-                          <div className="overflow-x-auto rounded-md border border-border">
-                            <table className="w-full text-[10px]">
-                              <thead>
-                                <tr className="border-b border-border bg-secondary/30">
-                                  {sheetPreview.headers.map((h, i) => <th key={i} className="whitespace-nowrap px-2 py-1 text-left font-medium">{h}</th>)}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {sheetPreview.rows.map((row, ri) => (
-                                  <tr key={ri} className="border-b border-border last:border-0">
-                                    {row.map((cell, ci) => <td key={ci} className="max-w-[120px] truncate whitespace-nowrap px-2 py-1 text-muted-foreground">{String(cell)}</td>)}
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
 
                 <div className="space-y-3 border-t border-border pt-4">
@@ -761,7 +746,6 @@ export default function TestCaseExecutionPage() {
                 />
                 <StatCard label="Execution Time" value={elapsedLabel(run.startedAt)} icon={Timer} />
                 <StatCard label="Avg. Execution Time" value={avgExecutionSeconds != null ? `${avgExecutionSeconds.toFixed(1)}s` : '—'} icon={Clock} />
-                <StatCard label="ETA" value={run.etaSeconds != null ? `${run.etaSeconds}s` : '—'} icon={Hourglass} />
                 <StatCard label="Bugs Found" value={bugs.length} icon={BugIcon} accent={bugs.length > 0 ? 'text-destructive' : undefined} />
               </div>
 
@@ -893,7 +877,7 @@ export default function TestCaseExecutionPage() {
         <div className="space-y-4 xl:sticky xl:top-4">
           <Card className="border-border bg-card/60 p-4 backdrop-blur">
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-display text-xs font-semibold">{run?.engineMode === 'real_browser' ? 'Live Browser' : 'Live Device'}</h2>
+              <h2 className="font-display text-xs font-semibold">Live Tracking</h2>
               {run && <Badge variant="secondary" className="text-[10px]">{run.engineMode === 'real_browser' ? 'Real' : 'Simulated'}</Badge>}
             </div>
             {!run ? (
@@ -907,25 +891,6 @@ export default function TestCaseExecutionPage() {
                 ) : (
                   <Smartphone className="h-8 w-8 text-muted-foreground" />
                 )}
-              </div>
-            )}
-            {run && (
-              <div className="mt-3 space-y-1 text-[11px]">
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Current Screen</span><span className="max-w-[60%] truncate">{run.currentScreen ?? '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">App Version</span><span>{run.buildVersion ?? '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Battery className="h-3 w-3" /> Battery</span><span>{isLive ? '78%' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Cpu className="h-3 w-3" /> CPU</span><span>{isLive ? '34%' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><MemoryStick className="h-3 w-3" /> Memory</span><span>{isLive ? '512 MB' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Signal className="h-3 w-3" /> Network</span><span>{isLive ? 'Wi-Fi' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Wifi className="h-3 w-3" /> Resolution</span><span>1080×2400</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Orientation</span><span>Portrait</span></div>
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Status</span>
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className={cn('h-1.5 w-1.5 rounded-full', isLive ? 'bg-emerald-500' : 'bg-muted-foreground')} />
-                    {isLive ? 'Online' : 'Offline'}
-                  </span>
-                </div>
               </div>
             )}
           </Card>

@@ -301,7 +301,7 @@ function seedRank(seed: IssueSeed): number {
  */
 export async function recomputeBoardRollups(boardId: string) {
   const cards = await QaIssueCard.find({ boardId }).select(
-    'status severity priority assignedToName',
+    'status severity priority assignedToName category',
   ).lean<any[]>();
 
   const count = (s: IssueStatus) => cards.filter((c) => c.status === s).length;
@@ -328,6 +328,8 @@ export async function recomputeBoardRollups(boardId: string) {
     closedIssues: closed,
     criticalIssues: cards.filter((c) => c.severity === 'critical').length,
     highPriorityIssues: cards.filter((c) => c.priority === 'p1' || c.severity === 'high').length,
+    functionalIssues: cards.filter((c) => c.category === 'functional').length,
+    uiIssues: cards.filter((c) => c.category === 'ui').length,
     assignedDevelopers: Array.from(new Set(cards.map((c) => c.assignedToName).filter(Boolean))),
     severities: Array.from(new Set(cards.map((c) => c.severity).filter(Boolean))),
     priorities: Array.from(new Set(cards.map((c) => c.priority).filter(Boolean))),
@@ -369,6 +371,7 @@ export async function syncIssueBoardForRun(runId: string): Promise<SyncResult | 
     boardName,
     projectName,
     applicationName,
+    applicationIconDataUrl: project.appIconDataUrl || null,
     executionNumber: run.runNumber,
     executionId: executionLabel(run.runNumber),
     moduleType: run.sourceMode === 'uploaded' ? 'uploaded' : 'catalog',

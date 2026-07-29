@@ -13,7 +13,7 @@ import { QaBug } from '@/lib/mongodb/models/QaBug';
 import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
 import { interpretStep } from '@/lib/qa/step-interpreter';
 import {
-  captureDeviceScreen, detectCrashes, readLogcat, stopApp, ensureAppForeground,
+  captureDeviceScreen, detectCrashes, readLogcat, stopApp, ensureAppForeground, dismissBlockingOverlay,
 } from '@/lib/qa/android-bridge';
 import {
   executeAndroidStep, validateAndroidExpectation, currentAndroidScreen,
@@ -51,6 +51,10 @@ interface StepRecord {
 export interface AndroidRunTotals {
   passed: number; failed: number; blocked: number; bugSeq: number;
   severityCounts: Record<string, number>;
+  /** True when the user's Stop Execution request ended the run early — the
+   *  caller must record the run as 'cancelled' rather than compute pass/fail
+   *  from whatever partial totals were collected. */
+  cancelled: boolean;
 }
 
 export async function executeAndroidSuite(opts: {
@@ -62,9 +66,26 @@ export async function executeAndroidSuite(opts: {
   deviceLabel: string;
   prep: PreparationResult;
 }): Promise<AndroidRunTotals> {
-  const { runId, run, project, cases, serial, deviceLabel, prep } = opts;
+  const { runId, run, project, serial, deviceLabel, prep } = opts;
   const pkg = prep.packageName;
-  const total = cases.length;
+  const total = opts.cases.length;
+
+  // Execute Module-wise: every case for a module runs together, in the order
+  // modules first appear in the sheet — a stable sort, so within a module the
+  // original row order (and therefore TC ID order) is untouched.
+  const moduleOrder: string[] = [];
+  for (const tc of opts.cases) {
+    const m = String(tc.module ?? '');
+    if (!moduleOrder.includes(m)) moduleOrder.push(m);
+  }
+  const cases = opts.cases
+    .map((tc, index) => ({ tc, index }))
+    .sort((a, b) => {
+      const ma = moduleOrder.indexOf(String(a.tc.module ?? ''));
+      const mb = moduleOrder.indexOf(String(b.tc.module ?? ''));
+      return ma !== mb ? ma - mb : a.index - b.index;
+    })
+    .map(({ tc }) => tc);
 
   let passed = 0;
   let failed = 0;
@@ -73,6 +94,22 @@ export async function executeAndroidSuite(opts: {
   const severityCounts: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
   const nextBugNumber = () => `BUG-${run.runNumber}-${String(++bugSeq).padStart(3, '0')}`;
   const caseElapsedMs: number[] = [];
+
+  // Cooperative cancellation: the Stop Execution button flips the run's
+  // status to 'cancelled' in the DB; this engine polls that (throttled, so it
+  // costs one extra query every ~2.5s rather than one per step) and stops
+  // promptly instead of running every remaining case on the device.
+  let lastCancelCheck = 0;
+  let cancelled = false;
+  const checkCancelled = async (): Promise<boolean> => {
+    if (cancelled) return true;
+    const now = Date.now();
+    if (now - lastCancelCheck < 2_500) return false;
+    lastCancelCheck = now;
+    const doc = await QaTestRun.findById(runId).select('status').lean<{ status: string } | null>();
+    cancelled = doc?.status === 'cancelled';
+    return cancelled;
+  };
 
   // The very first real frame, so the Live Device Preview is populated before
   // step 1 rather than showing an empty panel.
@@ -83,7 +120,13 @@ export async function executeAndroidSuite(opts: {
     });
   }
 
+  caseLoop:
   for (let i = 0; i < cases.length; i++) {
+    if (await checkCancelled()) {
+      await log(runId, 'automation', 'warn', `Execution stopped by user request before test case ${i + 1}/${cases.length}. Partial results are saved.`);
+      break;
+    }
+
     const tc = cases[i];
     const caseStart = Date.now();
 
@@ -133,6 +176,11 @@ export async function executeAndroidSuite(opts: {
     }
 
     for (let si = 0; si < tc.steps.length; si++) {
+      if (await checkCancelled()) {
+        await log(runId, 'automation', 'warn', `[${tc.testCaseId}] Execution stopped by user request at step ${si + 1}/${tc.steps.length}. Partial results are saved.`);
+        break caseLoop;
+      }
+
       const instruction = tc.steps[si];
       const action = interpretStep(instruction, tc.testData);
 
@@ -150,8 +198,30 @@ export async function executeAndroidSuite(opts: {
         continue;
       }
 
+      // Proactively clear an ad/promo/onboarding interstitial before even
+      // attempting the step — these are never what the sheet's step is about,
+      // so they must never be allowed to fail it. Cheap: one UI dump when
+      // nothing is blocking, since the dismiss helper no-ops immediately.
+      const preDismiss = await dismissBlockingOverlay(serial).catch(() => ({ handled: [] as string[] }));
+      if (preDismiss.handled.length > 0) {
+        await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1}: ${preDismiss.handled.join('; ')} before executing.`);
+      }
+
       const stepStart = Date.now();
-      const exec = await executeAndroidStep(serial, action, pkg);
+      let exec = await executeAndroidStep(serial, action, pkg);
+
+      // The step's own failure can itself be an overlay the tap surfaced
+      // (e.g. an interstitial ad triggered by the previous step). Clear it and
+      // retry exactly once before accepting the step as genuinely failed —
+      // this is what keeps the run going past Ads/Onboarding/permission nags
+      // instead of stopping on them.
+      if (!exec.ok) {
+        const postDismiss = await dismissBlockingOverlay(serial).catch(() => ({ handled: [] as string[] }));
+        if (postDismiss.handled.length > 0) {
+          await log(runId, 'automation', 'warn', `[${tc.testCaseId}] Step ${si + 1} initially failed; ${postDismiss.handled.join('; ')} and retrying.`);
+          exec = await executeAndroidStep(serial, action, pkg);
+        }
+      }
       const durationMs = Date.now() - stepStart;
 
       let status: StepRecord['status'] = exec.ok ? 'pass' : 'fail';
@@ -207,6 +277,9 @@ export async function executeAndroidSuite(opts: {
       finalResult = rec.status === 'blocked' ? 'blocked' : 'fail';
       finalActual = `Step ${firstFailedStepIndex + 1} ("${rec.instruction}") ${rec.status === 'blocked' ? 'could not be executed' : 'failed'}: ${firstFailureDetail}`;
     } else {
+      // Same reasoning as per-step: an ad/promo overlay must never be mistaken
+      // for the app's genuine expected-result screen.
+      await dismissBlockingOverlay(serial).catch(() => null);
       const v = await validateAndroidExpectation(serial, tc.expectedResult, pkg);
       finalResult = v.status === 'pass' ? 'pass' : v.status === 'fail' ? 'fail' : 'blocked';
       finalActual = v.actual;
@@ -310,5 +383,5 @@ export async function executeAndroidSuite(opts: {
 
   if (pkg) await stopApp(serial, pkg).catch(() => {});
 
-  return { passed, failed, blocked, bugSeq, severityCounts };
+  return { passed, failed, blocked, bugSeq, severityCounts, cancelled };
 }

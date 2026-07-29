@@ -365,10 +365,50 @@ export async function validateAndroidExpectation(
   };
 }
 
-/** Human-readable name of the current screen, from the focused activity. */
-export async function currentAndroidScreen(serial: string): Promise<string> {
+async function currentActivityLabel(serial: string): Promise<string | null> {
   const out = await shell(serial, 'dumpsys window | grep -E "mCurrentFocus"', 10000);
   const activity = out.match(/[\w.]+\/([\w.$]+)/)?.[1];
-  if (activity) return activity.split('.').pop() ?? activity;
-  return 'Unknown';
+  return activity ? (activity.split('.').pop() ?? activity) : null;
+}
+
+/**
+ * Human-readable name of the current screen.
+ *
+ * A raw Activity class name is often useless for identifying which screen is
+ * actually showing — many apps (SPA-style navigation, WebViews, a single
+ * "MainActivity" hosting every fragment) never change activity at all. So the
+ * screen is identified dynamically from what is genuinely on screen: a
+ * toolbar/title-style node first, then the most prominent visible label near
+ * the top of the screen, and only then the Activity class name as a last
+ * resort. Nothing here is hardcoded to a specific app's navigation flow.
+ */
+export async function currentAndroidScreen(serial: string): Promise<string> {
+  const nodes = await dumpUi(serial);
+
+  if (nodes.length > 0) {
+    // 1) A node that is clearly a title/toolbar by id or class, with real text.
+    const titleNode = nodes.find((n) => {
+      const label = (n.text || n.contentDesc).trim();
+      if (label.length < 2) return false;
+      return /title|toolbar|header|actionbar|app_?bar/i.test(`${n.resourceId} ${n.className}`);
+    });
+    if (titleNode) return (titleNode.text || titleNode.contentDesc).trim().slice(0, 60);
+
+    // 2) The most prominent label near the top of the screen — the part of a
+    // native UI a user actually reads to know where they are.
+    const { height } = await screenSize(serial).catch(() => ({ width: 0, height: 0 }));
+    const topBand = height > 0 ? height * 0.25 : Infinity;
+    const candidates = nodes
+      .filter((n) => {
+        const label = (n.text || n.contentDesc).trim();
+        return label.length >= 3 && !/^\d+$/.test(label) && n.bounds.y1 <= topBand;
+      })
+      .sort((a, b) => a.bounds.y1 - b.bounds.y1 || (b.text.length - a.text.length));
+    if (candidates.length > 0) {
+      return (candidates[0].text || candidates[0].contentDesc).trim().slice(0, 60);
+    }
+  }
+
+  // 3) Last resort — the raw Activity class name.
+  return (await currentActivityLabel(serial)) ?? 'Unknown';
 }

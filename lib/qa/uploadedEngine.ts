@@ -370,16 +370,18 @@ async function runOnAndroidDevice(
     return;
   }
 
-  const { passed, failed, blocked } = totals;
-  run.status = failed > 0 ? (passed > 0 ? 'partial' : 'failed') : blocked > 0 ? 'partial' : 'passed';
+  const { passed, failed, blocked, cancelled } = totals;
+  // A user-requested stop must land as 'cancelled', never be overwritten by
+  // whatever pass/fail totals happened to be collected before it took effect.
+  run.status = cancelled ? 'cancelled' : failed > 0 ? (passed > 0 ? 'partial' : 'failed') : blocked > 0 ? 'partial' : 'passed';
   run.progress = 100;
-  run.currentStep = 'Completed';
+  run.currentStep = cancelled ? 'Cancelled' : 'Completed';
   run.currentCase = null;
   run.etaSeconds = 0;
   run.completedAt = new Date();
   await run.save();
 
-  await log(runId, 'automation', 'info', `Run completed on ${deviceLabel}: ${run.status.toUpperCase()} — ${passed}/${cases.length} passed, ${failed} failed, ${blocked} blocked.`);
+  await log(runId, 'automation', 'info', `Run ${cancelled ? 'stopped by user' : 'completed'} on ${deviceLabel}: ${run.status.toUpperCase()} — ${passed}/${cases.length} passed, ${failed} failed, ${blocked} blocked.`);
   await onRunCompleted(runId);
 }
 

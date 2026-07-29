@@ -802,6 +802,7 @@ export interface QaIssueBoard {
   boardName: string;
   projectName: string;
   applicationName: string;
+  applicationIconDataUrl: string | null;
   executionNumber: number;
   executionId: string;
   moduleType: QaRunSourceMode;
@@ -825,6 +826,8 @@ export interface QaIssueBoard {
   closedIssues: number;
   criticalIssues: number;
   highPriorityIssues: number;
+  functionalIssues: number;
+  uiIssues: number;
   assignedDevelopers: string[];
   severities: string[];
   priorities: string[];

@@ -46,7 +46,12 @@ export async function GET(req: Request) {
   if (application && application !== 'all') query.applicationName = application;
   if (moduleType && moduleType !== 'all') query.moduleType = moduleType;
   if (platform && platform !== 'all') query.platform = platform;
-  if (status && status !== 'all') query.status = status;
+  if (status && status !== 'all') {
+    // Quick-filter tabs (Running/Active/Complete) pass a comma-separated
+    // list of statuses; the detailed Status filter still passes exactly one.
+    const list = status.split(',').map((s) => s.trim()).filter(Boolean);
+    query.status = list.length > 1 ? { $in: list } : list[0];
+  }
   if (developer && developer !== 'all') query.assignedDevelopers = developer;
   if (severity && severity !== 'all') query.severities = severity;
   if (priority && priority !== 'all') query.priorities = priority;
@@ -96,7 +101,10 @@ export async function GET(req: Request) {
   ]);
 
   return NextResponse.json({
-    boards: docs.map(serializeDoc),
+    boards: docs.map((d) => ({
+      ...serializeDoc(d),
+      isFavourited: (d.favouritedBy ?? []).some((id: unknown) => String(id) === user.id),
+    })),
     total,
     page,
     pageSize,

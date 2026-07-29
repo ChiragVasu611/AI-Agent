@@ -144,8 +144,24 @@ export async function installApp(
   }
 
   // -r reinstall keeping data, -t allow test builds, -d allow version downgrade.
-  const r = await adb(serial, ['install', '-r', '-t', '-d', filePath], INSTALL_TIMEOUT_MS);
-  const combined = `${r.stdout}\n${r.stderr}`.trim();
+  let r = await adb(serial, ['install', '-r', '-t', '-d', filePath], INSTALL_TIMEOUT_MS);
+  let combined = `${r.stdout}\n${r.stderr}`.trim();
+  let recovered: string | null = null;
+
+  // Some devices/Android builds still refuse a downgrade or a signature
+  // mismatch even with -d (a real tester re-uploading an older or
+  // differently-signed build than what's already on the device is a normal,
+  // common case — this must not just dead-end the whole run). The only
+  // resolution ADB itself supports is a clean uninstall first.
+  if (!/Success/i.test(combined) && packageName && /VERSION_DOWNGRADE|UPDATE_INCOMPATIBLE|INSTALL_FAILED_ALREADY_EXISTS/i.test(combined)) {
+    const reasonFirst = combined.match(/Failure \[([^\]]+)\]/)?.[1] ?? 'a conflicting existing install';
+    await adb(serial, ['uninstall', packageName], INSTALL_TIMEOUT_MS).catch(() => null);
+    r = await adb(serial, ['install', '-r', '-t', '-d', filePath], INSTALL_TIMEOUT_MS);
+    combined = `${r.stdout}\n${r.stderr}`.trim();
+    if (/Success/i.test(combined)) {
+      recovered = `The existing install conflicted with this build (${reasonFirst}), so it was uninstalled first and this build was installed fresh.`;
+    }
+  }
 
   if (!/Success/i.test(combined)) {
     const reason = combined.match(/Failure \[([^\]]+)\]/)?.[1] ?? combined.split('\n').filter(Boolean).pop() ?? 'unknown error';
@@ -170,7 +186,11 @@ export async function installApp(
     }
   }
 
-  return { ok: true, message: `Installed successfully${packageName ? ` (${packageName})` : ''}.`, packageName };
+  return {
+    ok: true,
+    message: `Installed successfully${packageName ? ` (${packageName})` : ''}.${recovered ? ` ${recovered}` : ''}`,
+    packageName,
+  };
 }
 
 // -------------------------------------------------------------------- launch
@@ -684,6 +704,51 @@ export async function ensureAppForeground(
       ? `App had drifted to "${fg ?? 'unknown'}" and was brought back to the foreground.${dialogs.crashed ? ' A crash/ANR dialog was cleared first.' : ''}`
       : `App is not in the foreground (currently "${nowFg ?? 'unknown'}") and could not be restored: ${relaunch.message}`,
   };
+}
+
+/**
+ * Unambiguous ad/interstitial/promo dismiss vocabulary only — deliberately
+ * narrow. A test step is free to target "Continue", "Next", "OK", "Allow",
+ * etc. itself, so those generic labels must NEVER be auto-tapped here or this
+ * would race the sheet's own intended interaction.
+ */
+const OVERLAY_DISMISS_RE = /\b(skip\s*ad|skip\s*advertisement|close\s*ad|no,?\s*thanks|no\s*thank\s*you|not\s*now|maybe\s*later|remind\s*me\s*later|rate\s*later)\b/i;
+const OVERLAY_CLOSE_ICON_RE = /\b(close|dismiss|skip)\b/i;
+/** A small square control is very likely an ad/interstitial's corner "X", not real app content. */
+const SMALL_ICON_MAX_AREA = 140 * 140;
+
+/**
+ * Best-effort dismissal of an ad/promo interstitial or onboarding nag sitting
+ * on top of the app under test — the kind of screen a sheet's step never
+ * mentions but that would otherwise silently block every element lookup for
+ * the rest of the run. Deliberately conservative: only unambiguous ad/promo
+ * vocabulary and small corner close-icons are tapped, never generic flow
+ * buttons a test step might be about to target itself.
+ */
+export async function dismissBlockingOverlay(
+  serial: string,
+  maxRounds = 2,
+): Promise<{ handled: string[] }> {
+  const handled: string[] = [];
+
+  for (let round = 0; round < maxRounds; round++) {
+    const nodes = await dumpUi(serial);
+    if (nodes.length === 0) break;
+
+    const byText = nodes.find((n) => n.clickable && n.enabled && OVERLAY_DISMISS_RE.test(`${n.text} ${n.contentDesc}`));
+    const byIcon = !byText
+      ? nodes.find((n) => n.clickable && n.enabled && OVERLAY_CLOSE_ICON_RE.test(n.contentDesc) && nodeArea(n) > 0 && nodeArea(n) <= SMALL_ICON_MAX_AREA)
+      : null;
+    const target = byText ?? byIcon;
+    if (!target) break;
+
+    const label = (target.text || target.contentDesc || 'close icon').trim();
+    await tap(serial, target.center.x, target.center.y);
+    await new Promise((r) => setTimeout(r, 900));
+    handled.push(`dismissed overlay ("${label}")`);
+  }
+
+  return { handled };
 }
 
 /** All on-screen text, used for expectation assertions. */
