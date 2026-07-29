@@ -1,6 +1,10 @@
 import type { Config } from 'tailwindcss';
 
 const config: Config = {
+  // Class-based dark mode: next-themes toggles `.dark` on <html>. Previously no
+  // darkMode strategy was configured at all, so the `dark:` variants already
+  // present in a handful of components could never activate.
+  darkMode: 'class',
   content: [
     './pages/**/*.{js,ts,jsx,tsx,mdx}',
     './components/**/*.{js,ts,jsx,tsx,mdx}',
@@ -25,6 +29,9 @@ const config: Config = {
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
         xl: 'calc(var(--radius) + 4px)',
+        // Named roles: cards sit softer (~15px) than controls (~10px).
+        card: 'var(--radius-card)',
+        control: 'var(--radius-control)',
       },
       // Soft, ink-tinted elevation for the Modern SaaS surface style. Overrides
       // Tailwind's default grey shadows globally, so every `shadow-sm/md/lg`
@@ -57,7 +64,17 @@ const config: Config = {
           '3': 'hsl(var(--chart-3))',
           '4': 'hsl(var(--chart-4))',
           '5': 'hsl(var(--chart-5))',
+          '6': 'hsl(var(--chart-6))',
         },
+        // Added semantic surfaces/states. Existing names are untouched, so no
+        // current class usage changes meaning.
+        surface: { DEFAULT: 'hsl(var(--surface))', foreground: 'hsl(var(--surface-foreground))' },
+        sidebar: {
+          DEFAULT: 'hsl(var(--sidebar))',
+          foreground: 'hsl(var(--sidebar-foreground))',
+          border: 'hsl(var(--sidebar-border))',
+        },
+        info: { DEFAULT: 'hsl(var(--info))', foreground: 'hsl(var(--info-foreground))' },
       },
       keyframes: {
         'accordion-down': { from: { height: '0' }, to: { height: 'var(--radix-accordion-content-height)' } },

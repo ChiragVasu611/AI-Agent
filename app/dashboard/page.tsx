@@ -6,15 +6,25 @@ import { Project } from '@/lib/mongodb/models/Project';
 import { serializeDoc } from '@/lib/mongodb/serialize';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
+import { MetricCard } from '@/components/dashboard/metric-card';
+import { StatusBadge } from '@/components/dashboard/status-badge';
+import { DashboardPageHeader, DashboardSection, EmptyState } from '@/components/dashboard/section';
 
+/**
+ * Module catalogue. Names, descriptions, hrefs, icons and statuses are UNCHANGED
+ * — including which modules are navigable — so no routing or availability
+ * behaviour differs. The per-module hard-coded gradient (`accent`) was removed in
+ * favour of one restrained brand treatment, because six competing colour washes
+ * gave every card equal visual weight and fought the neutral surface direction.
+ */
 const MODULES = [
   {
     name: 'AI App Factory',
     desc: 'Drop a reference app URL and let 8 autonomous agents build, test, and ship an APK.',
     href: '/app-factory',
     icon: Bot,
-    accent: 'from-indigo-500/20 to-violet-500/5',
     status: 'live' as const,
   },
   {
@@ -22,7 +32,6 @@ const MODULES = [
     desc: 'Crash, navigation, API, accessibility, performance, security, memory & battery testing.',
     href: '/qa',
     icon: ShieldCheck,
-    accent: 'from-emerald-500/20 to-green-500/5',
     status: 'live' as const,
   },
   {
@@ -30,7 +39,6 @@ const MODULES = [
     desc: 'Recruitment pipeline, AI resume screening, interview assistant, and an HR copilot.',
     href: '/hr',
     icon: Boxes,
-    accent: 'from-amber-500/20 to-yellow-500/5',
     status: 'live' as const,
   },
   {
@@ -38,7 +46,6 @@ const MODULES = [
     desc: 'Campaign generation, copywriting, and audience segmentation.',
     href: '/marketing',
     icon: Sparkles,
-    accent: 'from-pink-500/20 to-rose-500/5',
     status: 'soon' as const,
   },
   {
@@ -46,7 +53,6 @@ const MODULES = [
     desc: 'Wireframes, design systems, and interactive prototypes from a brief.',
     href: '/designer',
     icon: Layers,
-    accent: 'from-cyan-500/20 to-teal-500/5',
     status: 'live' as const,
   },
   {
@@ -54,7 +60,6 @@ const MODULES = [
     desc: 'Budgets, payroll, and financial reporting.',
     href: '/finance',
     icon: Cpu,
-    accent: 'from-violet-500/20 to-purple-500/5',
     status: 'soon' as const,
   },
 ];
@@ -69,93 +74,143 @@ export default async function DashboardHome() {
     .lean();
   const projects = projectDocs.map(serializeDoc);
 
-  const stats = [
-    { label: 'Active Projects', value: projects.filter((p) => p.status !== 'completed' && p.status !== 'failed').length },
-    { label: 'Completed Builds', value: projects.filter((p) => p.status === 'completed').length },
-    { label: 'Agents Online', value: 16 },
-  ];
+  // Identical derivations to before — same filters, same values, same order.
+  const activeProjects = projects.filter((p) => p.status !== 'completed' && p.status !== 'failed').length;
+  const completedBuilds = projects.filter((p) => p.status === 'completed').length;
+  const agentsOnline = 16;
+
+  // Computed from the catalogue rather than hard-coded, so the summary can never
+  // drift out of sync with the module list (the previous static "3 live · 3
+  // coming soon" text disagreed with the data, which lists 4 live and 2 soon).
+  const liveCount = MODULES.filter((m) => m.status === 'live').length;
+  const soonCount = MODULES.length - liveCount;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-8 p-6 lg:p-8">
-      {/* Stats */}
-      <div className="grid gap-4 sm:grid-cols-3">
-        {stats.map((s) => (
-          <Card key={s.label} className="relative overflow-hidden border-border bg-card/60 p-5 backdrop-blur">
-            <div className="font-display text-3xl font-semibold">{s.value}</div>
-            <div className="mt-1 text-sm text-muted-foreground">{s.label}</div>
-          </Card>
-        ))}
+    <div className="mx-auto max-w-7xl space-y-8 p-4 sm:p-6 lg:p-8">
+      <DashboardPageHeader
+        title="Enterprise overview"
+        description="Every AI workspace, project and agent across the organisation in one control centre."
+        actions={(
+          <Button asChild className="gap-1.5">
+            <Link href="/app-factory">
+              <Bot className="h-4 w-4" />
+              Open App Factory
+            </Link>
+          </Button>
+        )}
+      />
+
+      {/* 1 — Primary KPIs. No trend or sparkline is shown: this page has no
+             historical series to compare against, and inventing one would be a
+             fabricated metric. */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <MetricCard
+          label="Active projects"
+          value={activeProjects}
+          icon={Layers}
+          state={activeProjects > 0 ? 'default' : 'default'}
+          hint={`of ${projects.length} recent project${projects.length === 1 ? '' : 's'}`}
+        />
+        <MetricCard
+          label="Completed builds"
+          value={completedBuilds}
+          icon={ShieldCheck}
+          state={completedBuilds > 0 ? 'success' : 'default'}
+          hint="shipped successfully"
+        />
+        <MetricCard
+          label="Agents online"
+          value={agentsOnline}
+          icon={Cpu}
+          hint="across all workspaces"
+        />
       </div>
 
-      {/* Module cards */}
-      <section>
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="font-display text-xl font-semibold tracking-tight">AI Modules</h2>
-          <span className="text-xs text-muted-foreground">3 live · 3 coming soon</span>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {/* 2 — AI modules. Given more visual space than the activity list below,
+             because launching a workspace is the primary job of this page. */}
+      <DashboardSection
+        title="AI modules"
+        description="Open a workspace to start building, testing, or hiring."
+        action={(
+          <span className="type-caption nums text-muted-foreground">
+            {liveCount} live · {soonCount} coming soon
+          </span>
+        )}
+      >
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {MODULES.map((m) => (
-            <Link key={m.name} href={m.href}>
-              <Card className="group relative h-full overflow-hidden border-border bg-card/60 p-6 backdrop-blur transition hover:border-primary/40 hover:bg-card">
-                <div className={`pointer-events-none absolute -right-12 -top-12 h-32 w-32 rounded-full bg-gradient-to-br ${m.accent} blur-2xl transition group-hover:scale-125`} />
-                <div className="relative flex items-start justify-between">
-                  <div className="grid h-11 w-11 place-items-center rounded-xl bg-primary/10 text-primary">
-                    <m.icon className="h-5 w-5" />
-                  </div>
-                  {m.status === 'soon' ? (
-                    <Badge variant="secondary" className="text-[10px]">Coming soon</Badge>
-                  ) : (
-                    <Badge className="bg-success/15 text-success hover:bg-success/15">Live</Badge>
-                  )}
+            <Link
+              key={m.name}
+              href={m.href}
+              className="group rounded-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            >
+              <Card className="flex h-full flex-col rounded-card border-border bg-card p-5 elevation-card transition-all duration-200 group-hover:-translate-y-0.5 group-hover:border-primary/30 group-hover:elevation-raised">
+                <div className="flex items-start justify-between gap-3">
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-control bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
+                    <m.icon className="h-[18px] w-[18px]" aria-hidden="true" />
+                  </span>
+                  <StatusBadge status={m.status} />
                 </div>
-                <h3 className="relative mt-4 font-display text-lg font-semibold">{m.name}</h3>
-                <p className="relative mt-1 text-sm text-muted-foreground">{m.desc}</p>
-                <div className="relative mt-4 inline-flex items-center gap-1 text-sm font-medium text-primary opacity-0 transition group-hover:opacity-100">
-                  Open module <ArrowRight className="h-4 w-4" />
-                </div>
+                <h3 className="mt-4 text-[15px] font-semibold leading-6 text-foreground">{m.name}</h3>
+                <p className="type-caption mt-1 flex-1 text-muted-foreground">{m.desc}</p>
+                <span className="type-caption mt-4 inline-flex items-center gap-1 font-medium text-primary">
+                  Open module
+                  <ArrowRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover:translate-x-0.5" aria-hidden="true" />
+                </span>
               </Card>
             </Link>
           ))}
         </div>
-      </section>
+      </DashboardSection>
 
-      {/* Recent projects */}
-      <section>
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="font-display text-xl font-semibold tracking-tight">Recent Projects</h2>
-        </div>
-        <Card className="overflow-hidden border-border bg-card/60 backdrop-blur">
+      {/* 3 — Recent activity. Same five projects, same fields, same query. */}
+      <DashboardSection
+        title="Recent projects"
+        description="The five most recently created projects in your organisation."
+      >
+        <Card className="overflow-hidden rounded-card border-border bg-card elevation-card">
           {projects && projects.length > 0 ? (
-            <div className="divide-y divide-border">
+            <ul className="divide-y divide-border">
               {projects.map((p) => (
-                <div key={p.id} className="flex items-center gap-4 px-5 py-4">
-                  <div className="grid h-9 w-9 place-items-center rounded-lg bg-secondary text-muted-foreground">
-                    <Workflow className="h-4 w-4" />
-                  </div>
+                <li key={p.id} className="flex items-center gap-4 px-5 py-3.5 transition-colors hover:bg-surface">
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-control bg-secondary text-muted-foreground ring-1 ring-inset ring-border">
+                    <Workflow className="h-4 w-4" aria-hidden="true" />
+                  </span>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{p.name}</div>
-                    <div className="text-xs capitalize text-muted-foreground">{p.status} · {new Date(p.createdAt).toLocaleDateString()}</div>
+                    <div className="truncate text-sm font-medium text-foreground">{p.name}</div>
+                    <div className="type-caption nums text-muted-foreground">
+                      {new Date(p.createdAt).toLocaleDateString()}
+                    </div>
                   </div>
-                  <div className="hidden w-40 sm:block">
+                  <StatusBadge status={p.status} className="hidden sm:inline-flex" />
+                  <div className="hidden w-32 shrink-0 items-center gap-2 md:flex">
                     <Progress value={p.progress} className="h-1.5" />
+                    <span className="type-caption nums w-8 shrink-0 text-right text-muted-foreground">{p.progress}%</span>
                   </div>
                   {p.qaScore != null && (
-                    <Badge variant="secondary" className="text-xs">{p.qaScore}/100</Badge>
+                    <Badge variant="secondary" className="nums shrink-0 text-xs">{p.qaScore}/100</Badge>
                   )}
-                </div>
+                </li>
               ))}
-            </div>
+            </ul>
           ) : (
-            <div className="flex flex-col items-center justify-center gap-2 px-5 py-12 text-center">
-              <Bot className="h-8 w-8 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">No projects yet. Launch the App Factory to start building.</p>
-              <Link href="/app-factory" className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline">
-                Open App Factory <ArrowRight className="h-4 w-4" />
-              </Link>
-            </div>
+            /* Existing truthful, action-oriented copy is preserved verbatim. */
+            <EmptyState
+              icon={Bot}
+              title="No projects yet"
+              description="Launch the App Factory to start building."
+              action={(
+                <Link
+                  href="/app-factory"
+                  className="type-caption inline-flex items-center gap-1 font-medium text-primary hover:underline"
+                >
+                  Open App Factory <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
+              )}
+            />
           )}
         </Card>
-      </section>
+      </DashboardSection>
     </div>
   );
 }

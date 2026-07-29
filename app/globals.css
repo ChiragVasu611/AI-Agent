@@ -34,6 +34,75 @@
     --chart-4: 168 76% 42%;
     --chart-5: 330 78% 58%;
     --radius: 0.625rem;
+
+    /* --- Added semantic tokens (no existing name changed) --- */
+
+    /* Elevated surface: sits above `card` for nested panels, toolbars, wells. */
+    --surface: 240 30% 97%;
+    --surface-foreground: 234 24% 14%;
+    /* Sidebar is its own surface so the shell reads as a distinct plane. */
+    --sidebar: 240 33% 99%;
+    --sidebar-foreground: 234 24% 14%;
+    --sidebar-border: 240 24% 91%;
+    /* Informational state, completing success/warning/destructive. */
+    --info: 205 90% 46%;
+    --info-foreground: 0 0% 100%;
+    /* Sixth chart series for distributions that genuinely need one. */
+    --chart-6: 32 90% 52%;
+    /* Brand-tinted shadow colour so elevation feels part of the palette. */
+    --shadow-color: 243 60% 40%;
+    /* Controls sit slightly tighter than cards (buttons, inputs, badges). */
+    --radius-control: 0.625rem;
+    --radius-card: 0.95rem;
+  }
+
+  /*
+   * Dark theme.
+   *
+   * Only token VALUES change — every variable name matches the light theme, so
+   * the entire app re-skins with no markup or logic changes. Surfaces step up in
+   * lightness (background < card < surface) so elevation still reads without
+   * relying on shadows, which are far weaker on dark backgrounds.
+   */
+  .dark {
+    --background: 235 22% 8%;
+    --foreground: 240 20% 96%;
+    --card: 235 20% 11%;
+    --card-foreground: 240 20% 96%;
+    --popover: 235 20% 12%;
+    --popover-foreground: 240 20% 96%;
+    --primary: 243 82% 70%;
+    --primary-foreground: 235 40% 10%;
+    --secondary: 235 16% 17%;
+    --secondary-foreground: 240 18% 92%;
+    --muted: 235 16% 17%;
+    --muted-foreground: 235 14% 66%;
+    --accent: 243 30% 22%;
+    --accent-foreground: 243 90% 84%;
+    --destructive: 0 72% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 235 14% 20%;
+    --input: 235 14% 22%;
+    --ring: 243 82% 70%;
+    --success: 152 55% 50%;
+    --warning: 38 92% 58%;
+
+    --surface: 235 18% 14%;
+    --surface-foreground: 240 20% 96%;
+    --sidebar: 235 22% 9%;
+    --sidebar-foreground: 240 20% 96%;
+    --sidebar-border: 235 14% 18%;
+    --info: 205 85% 60%;
+    --info-foreground: 235 40% 10%;
+
+    /* Chart series lifted for contrast against the dark plotting surface. */
+    --chart-1: 243 82% 70%;
+    --chart-2: 262 84% 74%;
+    --chart-3: 199 88% 62%;
+    --chart-4: 168 66% 55%;
+    --chart-5: 330 78% 68%;
+    --chart-6: 32 90% 62%;
+    --shadow-color: 235 60% 3%;
   }
 }
 
@@ -73,6 +142,22 @@
     line-height: 26px;
     font-weight: 600;
     letter-spacing: -0.005em;
+  }
+  /* One-line description under a page title — muted, never competing with it. */
+  .type-page-description {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 400;
+  }
+  /*
+   * The headline number on a KPI card. Tight tracking and a moderate weight
+   * (not 700) so hierarchy comes from size and colour rather than heaviness.
+   */
+  .type-metric-value {
+    font-size: 30px;
+    line-height: 36px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
   .type-table-header {
     font-size: 14px;
@@ -135,4 +220,74 @@
   .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
   .scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 9999px; }
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+
+  /**
+   * Tabular figures. Statistics, timers, percentages, currency and polling
+   * metrics must not reflow as digits change — proportional figures make a
+   * live-updating number visibly jitter.
+   */
+  .nums {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  /* Soft, layered, brand-tinted elevation for premium card surfaces. */
+  .elevation-card {
+    box-shadow:
+      0 1px 2px 0 hsl(var(--shadow-color) / 0.05),
+      0 4px 16px -6px hsl(var(--shadow-color) / 0.10);
+  }
+  .elevation-raised {
+    box-shadow:
+      0 1px 2px 0 hsl(var(--shadow-color) / 0.06),
+      0 12px 32px -10px hsl(var(--shadow-color) / 0.18);
+  }
+
+  /**
+   * Active-navigation treatment: a soft brand-tinted wash with a subtle inset
+   * border, rather than a heavy solid block of colour.
+   */
+  .nav-active {
+    background: hsl(var(--primary) / 0.10);
+    box-shadow: inset 0 0 0 1px hsl(var(--primary) / 0.18);
+  }
+
+  /* Live/running pulse — a single calm indicator, not continuous motion. */
+  .pulse-dot {
+    position: relative;
+  }
+  .pulse-dot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background: currentColor;
+    opacity: 0.55;
+    animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes pulse-ring {
+    0%   { transform: scale(1);   opacity: 0.55; }
+    70%  { transform: scale(2.4); opacity: 0; }
+    100% { transform: scale(2.4); opacity: 0; }
+  }
+}
+
+/**
+ * Reduced motion. Users who ask the OS for less motion get no transitions,
+ * no entrance animations and no pulsing indicators — state is still conveyed,
+ * just instantly. Applies to Framer Motion output too, since it animates via
+ * inline styles that these declarations override.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .pulse-dot::after {
+    display: none;
+  }
 }

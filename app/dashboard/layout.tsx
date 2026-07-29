@@ -7,7 +7,10 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
-      <Sidebar />
+      {/* Below lg the sidebar is presented as a drawer from the top bar instead. */}
+      <div className="hidden lg:flex">
+        <Sidebar />
+      </div>
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar title="Enterprise AI Workspace" subtitle="Orchestrate every agent from one place" />
         <main className="flex-1 overflow-y-auto scrollbar-thin">{children}</main>
