@@ -587,7 +587,8 @@ export async function runWebTestExecution(runId: string) {
         const failedStepNumber = check.result === 'fail' ? 1 : null;
 
         const caseDoc = await QaTestCaseResult.create({
-          runId, testCaseId: check.testCaseId, name: check.name, module: check.module, screen: url, result: check.result, failedStepNumber,
+          runId, testCaseId: check.testCaseId, name: check.name, module: check.module, screen: url, result: check.result,
+          expectedResult: check.expectedResult, actualResult: check.actualResult, failedStepNumber,
         });
 
         if (check.result === 'pass') {

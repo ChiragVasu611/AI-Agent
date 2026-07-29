@@ -118,5 +118,9 @@ export interface CheckOutcome {
   module: string;
   screen: string;
   result: 'pass' | 'fail';
+  /** What the check asserts. Shown in the report's "Expected" column. */
+  expected?: string;
+  /** What was actually observed. Shown in the report's "Actual" column. */
+  actual?: string;
   finding?: Finding;
 }

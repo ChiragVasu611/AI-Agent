@@ -197,6 +197,33 @@ export function screenSignature(activity: string, nodes: UiNode[]): string {
   return `${activity.split('/').pop() ?? 'a'}~${(h >>> 0).toString(36)}`;
 }
 
+/**
+ * A coarser, capture-oriented fingerprint of a screen used to decide whether a
+ * screenshot would be a visual DUPLICATE of one already taken.
+ *
+ * Unlike {@link screenSignature}, it deliberately drops the node-count bucket
+ * and collapses repeated identical controls (list rows, feed items) to a single
+ * entry. As a screen loads its content asynchronously — a feed filling in, a
+ * spinner resolving, a video's overlay controls toggling — its element count
+ * fluctuates and the structural signature churns, which otherwise made the same
+ * visible screen register (and get screenshotted) again and again with no user
+ * action in between. Keying dedup on this stable fingerprint prevents that,
+ * while genuinely different screens still differ because their distinct control
+ * set does.
+ */
+export function perceptualSignature(activity: string, nodes: UiNode[]): string {
+  const skeleton = Array.from(new Set(
+    nodes
+      .filter((n) => n.clickable || n.scrollable || n.checkable || isEditable(n))
+      .map((n) => `${n.className.split('.').pop()}:${shortId(n)}:${n.clickable ? 'c' : ''}${n.scrollable ? 's' : ''}${n.checkable ? 'k' : ''}`),
+  )).sort().join('|');
+
+  let h = 5381;
+  const raw = `${activity}#${skeleton}`;
+  for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) | 0;
+  return `${activity.split('/').pop() ?? 'a'}~${(h >>> 0).toString(36)}`;
+}
+
 /** Elements a human would consider "the primary actions" on this screen. */
 export function primaryActions(state: ScreenState): UiNode[] {
   return state.nodes

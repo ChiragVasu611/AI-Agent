@@ -7,6 +7,8 @@ const qaTestCaseResultSchema = new Schema({
   module: { type: String, required: true },
   screen: { type: String, default: '' },
   result: { type: String, enum: ['pass', 'fail'], required: true },
+  expectedResult: { type: String, default: '' },
+  actualResult: { type: String, default: '' },
   failedStepNumber: { type: Number, default: null },
   bugId: { type: Schema.Types.ObjectId, ref: 'QaBug', default: null },
 }, { timestamps: { createdAt: true, updatedAt: false } });

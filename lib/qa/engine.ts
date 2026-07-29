@@ -134,6 +134,8 @@ export async function runQaTestExecution(runId: string, apiKey: string | null) {
 
       const caseDoc = await QaTestCaseResult.create({
         runId, testCaseId, name: c.name, module: moduleLabel, screen: c.screen, result: c.result, failedStepNumber,
+        expectedResult: `"${c.name}" behaves correctly on "${c.screen}".`,
+        actualResult: c.result === 'pass' ? 'Behaved as expected.' : 'Did not behave as expected — see the linked bug.',
       });
       caseRecords.push({ testCaseId, failedStepNumber, caseId: String(caseDoc._id) });
 

@@ -2,7 +2,7 @@ import type { Finding, Interaction, ScreenState, UiNode } from './types';
 import type { DeviceProfile } from './types';
 import { dumpHierarchy, focusedComponent, pressKey, KEY, isAppForeground, startAppTimed } from './device';
 import { parseHierarchy } from './ui-parser';
-import { classifyScreen, screenSignature, labelFromActivity } from './screen-classifier';
+import { classifyScreen, screenSignature, perceptualSignature, labelFromActivity } from './screen-classifier';
 import { detectAd, dismissAd, hasCountdown } from './ad-detector';
 import { detectPaywall, escapePaywall } from './paywall-detector';
 import { handleAllPermissions } from './permission-handler';
@@ -153,6 +153,12 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
   const blockers: Blocker[] = [];
   const coverageLimits: string[] = [];
   const seenSignatures = new Set<string>();
+  /**
+   * Perceptual fingerprints of screens already screenshotted. Guards against
+   * capturing the same visible screen repeatedly while it settles/animates
+   * (its structural signature churns but it looks identical to the user).
+   */
+  const capturedScreens = new Set<string>();
   /** Screens whose inline (non-blocking) ad was already recorded — log once. */
   const inlineAdsSeen = new Set<string>();
   /** Post-action observation reused as the next iteration's state (saves a dump). */
@@ -328,9 +334,13 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
         ? ` — features: ${planned.features.map((f) => f.name).slice(0, 4).join(', ')}`
         : '';
       await cfg.log('info', `New screen: "${state.label}" [${state.kind}] — ${actions.length} action(s) available${featureNote}.`);
-      await cfg.screenshots.capture({
-        runId: cfg.runId, screenName: state.label, reason: 'navigation', step: state.activity,
-      });
+      const perceptual = perceptualSignature(state.activity || state.packageName, state.nodes);
+      if (!capturedScreens.has(perceptual)) {
+        capturedScreens.add(perceptual);
+        await cfg.screenshots.capture({
+          runId: cfg.runId, screenName: state.label, reason: 'navigation', step: state.activity,
+        });
+      }
       await cfg.onNewScreen(state);
     } else {
       barrenStreak += 1;
@@ -487,12 +497,16 @@ export async function explore(cfg: ExplorerConfig): Promise<ExplorationResult> {
     carried = after;
 
     if (navigated && after) {
-      await cfg.screenshots.capture({
-        runId: cfg.runId,
-        screenName: after.label,
-        reason: 'after_interaction',
-        step: action.reason,
-      });
+      const perceptual = perceptualSignature(after.activity || after.packageName, after.nodes);
+      if (!capturedScreens.has(perceptual)) {
+        capturedScreens.add(perceptual);
+        await cfg.screenshots.capture({
+          runId: cfg.runId,
+          screenName: after.label,
+          reason: 'after_interaction',
+          step: action.reason,
+        });
+      }
     }
   }
 

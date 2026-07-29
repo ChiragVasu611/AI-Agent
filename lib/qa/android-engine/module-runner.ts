@@ -104,6 +104,12 @@ function functionalChecks(state: ScreenState, moduleLabel: string): CheckOutcome
     module: moduleLabel,
     screen: state.label,
     result: usable ? 'pass' : 'fail',
+    expected: 'The screen offers at least one enabled control or a clear way forward.',
+    actual: usable
+      ? (interactive.length > 0
+        ? `${interactive.length} enabled interactive control(s) present.`
+        : `Deliberate ${state.kind} screen — no controls required.`)
+      : `${state.nodes.length} element(s) present, none clickable/editable and enabled.`,
     finding: usable ? undefined : {
       type: 'functional',
       module: moduleLabel,
@@ -129,6 +135,8 @@ function functionalChecks(state: ScreenState, moduleLabel: string): CheckOutcome
       module: moduleLabel,
       screen: state.label,
       result: 'fail',
+      expected: 'The screen shows content, or an explicit empty/error state.',
+      actual: 'No text, content description, or interactive element was found in the hierarchy.',
       finding: {
         type: 'functional',
         module: moduleLabel,
@@ -152,6 +160,8 @@ function functionalChecks(state: ScreenState, moduleLabel: string): CheckOutcome
       module: moduleLabel,
       screen: state.label,
       result: 'pass',
+      expected: 'The screen shows content, or an explicit empty/error state.',
+      actual: `${state.nodes.length} element(s) rendered with visible content.`,
     });
   }
 
@@ -167,6 +177,8 @@ function smokeChecks(state: ScreenState, moduleLabel: string, pkg: string): Chec
     module: moduleLabel,
     screen: state.label,
     result: inApp ? 'pass' : 'fail',
+    expected: pkg ? `The screen is rendered by ${pkg}.` : 'The screen belongs to the app under test.',
+    actual: `Owning package: ${state.packageName}.`,
     finding: inApp ? undefined : {
       type: 'functional',
       module: moduleLabel,
@@ -200,7 +212,15 @@ function localizationChecks(state: ScreenState, moduleLabel: string): CheckOutco
   });
 
   if (suspicious.length === 0) {
-    return [{ testCaseId: nextId('L10N'), name: `"${state.label}" has no untranslated placeholders`, module: moduleLabel, screen: state.label, result: 'pass' }];
+    return [{
+      testCaseId: nextId('L10N'),
+      name: `"${state.label}" has no untranslated placeholders`,
+      module: moduleLabel,
+      screen: state.label,
+      result: 'pass',
+      expected: 'All visible strings are localized and fully formatted.',
+      actual: 'No raw resource keys or unsubstituted format placeholders were found.',
+    }];
   }
 
   return [{
@@ -209,6 +229,8 @@ function localizationChecks(state: ScreenState, moduleLabel: string): CheckOutco
     module: moduleLabel,
     screen: state.label,
     result: 'fail',
+    expected: 'All visible strings are localized and fully formatted.',
+    actual: `${suspicious.length} untranslated or unformatted string(s) visible in the UI.`,
     finding: {
       type: 'ui',
       module: moduleLabel,
@@ -250,6 +272,10 @@ export function runPerScreenModules(
       module: label,
       screen: state.label,
       result: findings.length === 0 ? 'pass' : 'fail',
+      expected: 'No clipped, overflowing, or overlapping elements in the layout.',
+      actual: findings.length === 0
+        ? 'No overflow or overlap defects detected in the layout.'
+        : `${findings.length} layout defect(s) detected — e.g. ${findings[0].title}.`,
       finding: findings[0],
     });
     // Additional findings beyond the first are reported as their own rows.
@@ -267,6 +293,10 @@ export function runPerScreenModules(
       module: label,
       screen: state.label,
       result: findings.length === 0 ? 'pass' : 'fail',
+      expected: 'Interactive elements have labels and meet minimum touch-target sizes.',
+      actual: findings.length === 0
+        ? 'All interactive elements are labelled and adequately sized.'
+        : `${findings.length} accessibility issue(s) detected — e.g. ${findings[0].title}.`,
       finding: findings[0],
     });
     for (const f of findings.slice(1)) {
@@ -422,6 +452,8 @@ export async function runPostModules(plan: ModulePlan, ctx: PostRunContext): Pro
       module: label,
       screen: ctx.primaryScreen,
       result: perf.findings.some((f) => f.title.startsWith('Cold start')) ? 'fail' : 'pass',
+      expected: 'Cold start completes within the performance budget.',
+      actual: perf.coldStartMs != null ? `Measured cold start: ${perf.coldStartMs}ms.` : 'Cold start time was not measurable.',
     });
     outcomes.push({
       testCaseId: nextId('PERF'),
@@ -429,6 +461,8 @@ export async function runPostModules(plan: ModulePlan, ctx: PostRunContext): Pro
       module: label,
       screen: ctx.primaryScreen,
       result: perf.findings.some((f) => f.title.includes('janky')) ? 'fail' : 'pass',
+      expected: 'Frame rendering stays smooth with minimal janky frames.',
+      actual: perf.frames?.jankyPct != null ? `${perf.frames.jankyPct.toFixed(1)}% of frames were janky.` : 'Frame statistics were not available.',
     });
     notes.push(`Performance: cold ${perf.coldStartMs ?? 'n/a'}ms, warm ${perf.warmStartMs ?? 'n/a'}ms, janky ${perf.frames?.jankyPct?.toFixed(1) ?? 'n/a'}%, CPU ${perf.cpu?.appPct ?? 'n/a'}%.`);
   }
@@ -446,6 +480,8 @@ export async function runPostModules(plan: ModulePlan, ctx: PostRunContext): Pro
       module: label,
       screen: ctx.primaryScreen,
       result: mem.findings.length === 0 ? 'pass' : 'fail',
+      expected: 'Memory usage stays stable across navigation (no runaway growth).',
+      actual: mem.growthKb != null ? `PSS changed by ${(mem.growthKb / 1024).toFixed(1)} MB during the run.` : 'Memory growth could not be measured.',
     });
     notes.push(`Memory: baseline ${baseline.totalPssKb ?? '?'}KB → final ${final.totalPssKb ?? '?'}KB PSS.`);
   }
@@ -462,6 +498,10 @@ export async function runPostModules(plan: ModulePlan, ctx: PostRunContext): Pro
       module: label,
       screen: ctx.primaryScreen,
       result: bat.findings.length === 0 ? 'pass' : 'fail',
+      expected: 'No excessive wake locks or background battery drain.',
+      actual: bat.findings.length === 0
+        ? 'No abnormal wake locks or background drain observed.'
+        : `${bat.findings.length} battery concern(s) detected — e.g. ${bat.findings[0].title}.`,
     });
     notes.push(`Battery: ${start.levelPct ?? '?'}% → ${bat.end.levelPct ?? '?'}%${bat.end.temperatureC != null ? `, ${bat.end.temperatureC.toFixed(1)}°C` : ''}.`);
   }
@@ -480,6 +520,10 @@ export async function runPostModules(plan: ModulePlan, ctx: PostRunContext): Pro
       module: label,
       screen: ctx.primaryScreen,
       result: net.signals.httpErrors.length === 0 ? 'pass' : 'fail',
+      expected: 'Network/API calls complete without HTTP error responses.',
+      actual: net.signals.httpErrors.length === 0
+        ? 'No HTTP error responses were observed.'
+        : `${net.signals.httpErrors.length} HTTP error response(s) observed.`,
     });
     if (net.offlineTested) {
       outcomes.push({
@@ -488,6 +532,10 @@ export async function runPostModules(plan: ModulePlan, ctx: PostRunContext): Pro
         module: label,
         screen: ctx.primaryScreen,
         result: net.offlineHandledGracefully ? 'pass' : 'fail',
+        expected: 'The app communicates loss of connectivity to the user.',
+        actual: net.offlineHandledGracefully
+          ? 'The app surfaced an offline state gracefully.'
+          : 'The app did not clearly communicate loss of connectivity.',
       });
     }
   }

@@ -40,6 +40,21 @@ function elapsedLabel(startedAt: string | null): string {
   return `${m}m ${s}s`;
 }
 
+/** Seconds a run actually took: frozen at completedAt once finished. */
+function executionSeconds(startedAt: string | null, completedAt: string | null): number | null {
+  if (!startedAt) return null;
+  const end = completedAt ? new Date(completedAt).getTime() : Date.now();
+  return Math.max(0, Math.floor((end - new Date(startedAt).getTime()) / 1000));
+}
+
+/** Renders a second count as "Xm Ys" (or just seconds under a minute). */
+function secondsLabel(secs: number | null): string {
+  if (secs == null) return '—';
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
 const STATUS_COLOR: Record<string, string> = {
   queued: 'bg-secondary text-muted-foreground',
   running: 'bg-primary/15 text-primary',
@@ -150,13 +165,13 @@ export default function QaRunPage() {
     }));
 
   const evaluatedCases = testCases.filter((t) => (t.result ?? '') !== 'pending');
-  const avgExecutionSeconds = (() => {
-    const times = evaluatedCases.map((t) => new Date(t.createdAt).getTime()).sort((a, b) => a - b);
-    if (times.length < 2) return null;
-    const diffs: number[] = [];
-    for (let i = 1; i < times.length; i++) diffs.push((times[i] - times[i - 1]) / 1000);
-    return diffs.reduce((a, b) => a + b, 0) / diffs.length;
-  })();
+  // Test-case result rows are all persisted together at report-compile time, so
+  // their createdAt gaps are ~0 and say nothing about per-case cost. Derive the
+  // average from the run's real wall-clock execution time instead.
+  const totalExecSeconds = executionSeconds(run.startedAt, run.completedAt);
+  const avgExecutionSeconds = totalExecSeconds != null && evaluatedCases.length > 0
+    ? totalExecSeconds / evaluatedCases.length
+    : null;
 
   // The simulation view adapts to the type of testing being executed:
   // web/browser tests show a landscape browser frame (full page, no crop),
@@ -228,7 +243,7 @@ export default function QaRunPage() {
             <div><div className="text-muted-foreground">Screen</div><div className="font-medium">{run.currentScreen ?? '—'}</div></div>
             <div><div className="text-muted-foreground">Feature</div><div className="font-medium">{run.currentFeature ?? '—'}</div></div>
             <div><div className="text-muted-foreground">Device</div><div className="font-medium">{run.currentDevice ?? '—'}</div></div>
-            <div><div className="text-muted-foreground">Elapsed</div><div className="font-medium">{elapsedLabel(run.startedAt)}</div></div>
+            <div><div className="text-muted-foreground">Elapsed</div><div className="font-medium">{isLive ? elapsedLabel(run.startedAt) : secondsLabel(executionSeconds(run.startedAt, run.completedAt))}</div></div>
             <div><div className="text-muted-foreground">Status</div><div className="font-medium capitalize">{run.status}</div></div>
           </div>
 
@@ -453,7 +468,7 @@ export default function QaRunPage() {
               </Card>
               <Card className="border-border bg-card/40 p-4">
                 <Clock className="h-4 w-4 text-muted-foreground" />
-                <div className="mt-2 font-display text-xl font-semibold">{elapsedLabel(run.startedAt)}</div>
+                <div className="mt-2 font-display text-xl font-semibold">{secondsLabel(totalExecSeconds)}</div>
                 <div className="text-[11px] text-muted-foreground">Total Execution Time</div>
               </Card>
               <Card className="border-border bg-card/40 p-4">

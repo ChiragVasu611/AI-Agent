@@ -18,6 +18,22 @@ export interface PersistedTotals {
 }
 
 /**
+ * Resolves the Expected/Actual text stored on a result row. Prefers the values
+ * the check set explicitly; falls back to the linked finding (failures always
+ * carry one); and finally derives a sensible default from the check's name so
+ * no row is ever left blank in the report.
+ */
+function expectedActual(o: CheckOutcome): { expected: string; actual: string } {
+  const expected = o.expected ?? o.finding?.expectedResult
+    ?? `${o.name}.`;
+  const actual = o.actual ?? o.finding?.actualResult
+    ?? (o.result === 'pass'
+      ? 'Verified — the screen behaved as expected.'
+      : 'The expected condition was not met.');
+  return { expected, actual };
+}
+
+/**
  * Writes outcomes to the DB. When an outcome has a finding, the finding is
  * filed via the reporter first so the row can reference the resulting bug.
  */
@@ -37,6 +53,7 @@ export async function persistOutcomes(
       bugId = await reporter.report(o.finding, shot);
     }
 
+    const { expected, actual } = expectedActual(o);
     await QaTestCaseResult.create({
       runId,
       testCaseId: o.testCaseId,
@@ -44,6 +61,8 @@ export async function persistOutcomes(
       module: o.module,
       screen: o.screen,
       result: o.result,
+      expectedResult: expected,
+      actualResult: actual,
       failedStepNumber: o.result === 'fail' ? 1 : null,
       // bugId links only when a NEW bug was created (duplicates return null).
       bugId: bugId ? (bugId as unknown) : null,
