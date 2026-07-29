@@ -40,13 +40,76 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
     font-feature-settings: 'rlig' 1, 'calt' 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+}
+
+/**
+ * Platform-wide typography scale (Inter). One named class per role, each
+ * pinning size/weight/line-height/letter-spacing together so a component
+ * never mixes, say, a Page Title's size with a Card Title's weight.
+ */
+@layer components {
+  .type-page-title {
+    font-size: 28px;
+    line-height: 36px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .type-section-title {
+    font-size: 22px;
+    line-height: 30px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .type-card-title {
+    font-size: 18px;
+    line-height: 26px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+  .type-table-header {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+  .type-body {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 400;
+  }
+  .type-caption {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 400;
+  }
+  .type-button {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+  }
+  .type-input {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 400;
+  }
+  .type-badge {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
   }
 }
 
 @layer utilities {
+  /* Kept for the many existing `.font-display` call sites — the platform
+     uses a single typeface (Inter) everywhere, so this now just resolves to
+     the same font as the sans default rather than a second typeface. */
   .font-display {
-    font-family: var(--font-display), sans-serif;
+    font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   }
   .text-gradient {
     @apply bg-clip-text text-transparent;

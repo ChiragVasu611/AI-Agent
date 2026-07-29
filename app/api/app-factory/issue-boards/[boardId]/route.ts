@@ -68,8 +68,29 @@ export async function GET(req: Request, { params }: { params: { boardId: string 
   const allLabels = await QaIssueCard.distinct('labels', { boardId: board._id });
 
   return NextResponse.json({
-    board: serializeDoc(board),
+    board: { ...serializeDoc(board), isFavourited: (board.favouritedBy ?? []).some((id: unknown) => String(id) === user.id) },
     cards: cards.map(serializeDoc),
     labels: (allLabels as string[]).filter(Boolean).sort(),
   });
+}
+
+/** Toggles the current user's favourite flag on this board. */
+export async function PATCH(req: Request, { params }: { params: { boardId: string } }) {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+
+  await connectToDatabase();
+
+  const board = await QaIssueBoard.findById(params.boardId);
+  if (!board) return NextResponse.json({ error: 'Board not found' }, { status: 404 });
+
+  const already = board.favouritedBy.some((id: unknown) => String(id) === user.id);
+  if (already) {
+    board.favouritedBy = board.favouritedBy.filter((id: unknown) => String(id) !== user.id);
+  } else {
+    board.favouritedBy.push(user.id);
+  }
+  await board.save();
+
+  return NextResponse.json({ isFavourited: !already });
 }

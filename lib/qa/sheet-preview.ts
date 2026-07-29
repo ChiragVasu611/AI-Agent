@@ -41,8 +41,25 @@ export async function parseSheetPreview(file: File): Promise<SheetPreview> {
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, defval: '' }) as unknown as string[][];
 
-  const headers = (rows[0] ?? []).map((h) => String(h ?? ''));
-  const dataRows = rows.slice(1).filter((r) => r.some((cell) => String(cell ?? '').trim() !== ''));
+  // Mirror the server parser: sheets often start with a title banner or
+  // metadata rows, so find the row that actually looks like column headings
+  // instead of assuming row 0.
+  const countMatches = (row: string[] | undefined) =>
+    (row ?? []).filter((h) => {
+      const norm = normalize(h);
+      return Object.values(HEADER_ALIASES).some((aliases) => aliases.includes(norm));
+    }).length;
+
+  let headerIndex = 0;
+  let bestScore = 0;
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const score = countMatches(rows[i]);
+    if (score > bestScore) { bestScore = score; headerIndex = i; }
+  }
+  if (bestScore < 2) headerIndex = 0;
+
+  const headers = (rows[headerIndex] ?? []).map((h) => String(h ?? ''));
+  const dataRows = rows.slice(headerIndex + 1).filter((r) => r.some((cell) => String(cell ?? '').trim() !== ''));
 
   const headerMapping = headers.map((h) => {
     const norm = normalize(h);

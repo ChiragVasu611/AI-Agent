@@ -369,6 +369,14 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
   let monkeyEvents = 0;
 
   if (plan.has('compatibility')) {
+    // Each dedicated module is a single blocking device operation lasting up
+    // to roughly a minute, so a stop request can't interrupt one mid-flight —
+    // but checking here bounds the worst-case delay to one module's duration
+    // instead of the whole remaining pipeline (compatibility + monkey + AI).
+    if (await checkCancelled(true)) {
+      await finalizeCancelled([...perScreenOutcomes, ...post.outcomes, ...dedicatedOutcomes]);
+      return;
+    }
     run.currentStep = 'Compatibility (rotation) testing';
     run.progress = 88;
     await run.save();
@@ -378,6 +386,10 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
   }
 
   if (plan.has('monkey')) {
+    if (await checkCancelled(true)) {
+      await finalizeCancelled([...perScreenOutcomes, ...post.outcomes, ...dedicatedOutcomes]);
+      return;
+    }
     run.currentStep = 'Monkey stress testing';
     run.progress = 91;
     await run.save();
@@ -408,10 +420,22 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
   }
 
   if (plan.has('ai_exploratory')) {
+    if (await checkCancelled(true)) {
+      await finalizeCancelled([...perScreenOutcomes, ...post.outcomes, ...dedicatedOutcomes]);
+      return;
+    }
     run.currentStep = 'AI exploratory analysis';
     run.progress = 94;
     await run.save();
     await runAiExploratory(exploration.graph, planningApiKey, emit);
+  }
+
+  // One last check before compiling and persisting the final report — a stop
+  // requested during AI exploratory analysis (network-bound, not device-bound)
+  // should still land as 'cancelled' rather than a full 'passed/failed' report.
+  if (await checkCancelled(true)) {
+    await finalizeCancelled([...perScreenOutcomes, ...post.outcomes, ...dedicatedOutcomes]);
+    return;
   }
 
   // ---------------------------------------------------------- PERSIST ALL

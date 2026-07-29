@@ -8,7 +8,6 @@ import {
 import { toast } from 'sonner';
 import { rerunQaTestRun, deleteQaTestRun } from '@/app/qa/runs/actions';
 import { exportCsv, exportExcel, exportPdf } from '@/lib/qa/export';
-import { QA_MODULES } from '@/lib/qa/modules';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -33,7 +32,6 @@ const MODULE_TYPE_OPTIONS = [
   { value: 'all', label: 'All Module Types' },
   { value: 'catalog', label: 'Test Execution' },
   { value: 'uploaded', label: 'AI Test Case Execution' },
-  ...QA_MODULES.map((m) => ({ value: m.key, label: m.label })),
 ];
 
 const PAGE_SIZES = [10, 25, 50, 100];
@@ -98,7 +96,7 @@ export default function QaTestRunsPage() {
     'Run ID': `RUN-${r.runNumber}`,
     'Project Name': r.project?.name ?? '—',
     'Application Name': r.project?.appDisplayName ?? r.project?.name ?? '—',
-    'Module Type': r.sourceMode === 'uploaded' ? 'AI Test Case Execution' : ['Test Execution', ...(r.modules ?? [])].join(', '),
+    'Module Type': r.sourceMode === 'uploaded' ? 'AI Test Case Execution' : 'Test Execution',
     Platform: r.project?.platform ?? '—',
     'Device Name': r.currentDevice ?? '—',
     'Executed By': r.executedByName ?? '—',
@@ -138,7 +136,7 @@ export default function QaTestRunsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-6 lg:p-8">
+    <div className="mx-auto max-w-[1800px] space-y-6 p-4 lg:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="flex items-center gap-2 font-display text-2xl font-semibold tracking-tight">
@@ -220,15 +218,7 @@ export default function QaTestRunsPage() {
                   <TableCell className="max-w-[160px] truncate text-xs">{r.project?.name ?? '—'}</TableCell>
                   <TableCell className="max-w-[160px] truncate text-xs">{r.project?.appDisplayName ?? r.project?.name ?? '—'}</TableCell>
                   <TableCell>
-                    <div className="flex flex-wrap gap-1">
-                      <Badge variant="secondary" className="text-[10px]">{r.sourceMode === 'uploaded' ? 'AI Test Case Execution' : 'Test Execution'}</Badge>
-                      {r.sourceMode !== 'uploaded' && (r.modules ?? []).slice(0, 2).map((m: string) => (
-                        <Badge key={m} variant="outline" className="text-[10px]">{m}</Badge>
-                      ))}
-                      {r.sourceMode !== 'uploaded' && (r.modules ?? []).length > 2 && (
-                        <Badge variant="outline" className="text-[10px]">+{(r.modules ?? []).length - 2}</Badge>
-                      )}
-                    </div>
+                    <Badge variant="secondary" className="text-[10px]">{r.sourceMode === 'uploaded' ? 'AI Test Case Execution' : 'Test Execution'}</Badge>
                   </TableCell>
                   <TableCell className="text-xs capitalize text-muted-foreground">{r.project?.platform ?? '—'}</TableCell>
                   <TableCell className="max-w-[140px] truncate text-xs text-muted-foreground">{r.currentDevice ?? '—'}</TableCell>

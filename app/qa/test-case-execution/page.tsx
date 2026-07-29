@@ -3,16 +3,19 @@
 import { useEffect, useMemo, useState, useTransition } from 'react';
 import Link from 'next/link';
 import {
-  Atom, Battery, Bug as BugIcon, CheckCircle2, Clock, Copy, Cpu,
-  Download, ExternalLink, FileSpreadsheet, Globe, Hourglass, Layers, ListChecks, Loader2,
-  MemoryStick, Play, PlayCircle, RefreshCw, ScrollText, Search, Settings2, ShieldAlert, Signal,
-  SkipForward, Smartphone, Terminal, Timer, UploadCloud, Wifi, XCircle,
+  Bug as BugIcon, CheckCircle2, Clock, Copy,
+  Download, ExternalLink, FileSpreadsheet, Globe, Loader2,
+  Play, RefreshCw, ScrollText, Search, ShieldAlert, Square,
+  SkipForward, Smartphone, Terminal, Timer, UploadCloud, XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { startUploadedTestExecution } from '@/app/qa/actions';
+import { cancelQaTestRun } from '@/app/qa/runs/actions';
 import { submitBinaryRun } from '@/lib/qa/submit-binary-run';
+import { attachSelectedDevice } from '@/lib/qa/selected-device';
+import { SelectedDeviceBanner } from '@/components/modules/qa/selected-device-banner';
 import { exportCsv, exportExcel } from '@/lib/qa/export';
-import { parseSheetPreview, type SheetPreview } from '@/lib/qa/sheet-preview';
+import { TestCaseSheetModal } from '@/components/modules/qa/test-case-sheet-modal';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -31,38 +34,34 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { BugCard } from '@/components/modules/qa/bug-card';
 
-const SOURCE_TYPES = [
-  { value: 'mobile', label: '📱 Mobile Application', icon: Smartphone },
-  { value: 'web_url', label: '🌐 Web URL', icon: Globe },
-  { value: 'play_store_url', label: '▶ Play Store', icon: PlayCircle },
-  { value: 'app_store_url', label: '🍎 App Store', icon: Smartphone },
-  { value: 'flutter', label: '⚛ Flutter', icon: Atom },
-  { value: 'react_native', label: '⚛ React Native', icon: Atom },
-  { value: 'hybrid', label: '🔷 Hybrid', icon: Layers },
-];
+/**
+ * Only three source types are shown. Flutter/React Native/Hybrid apps produce
+ * an ordinary .apk/.aab (or .ipa on iOS) at build time, so they need no
+ * separate nav item — they're just uploaded through the same Android/iOS
+ * Application workflow as any native app.
+ */
+const PLATFORM_TABS = [
+  { value: 'android', label: '📱 Android Application' },
+  { value: 'ios', label: '🍎 iOS Application' },
+  { value: 'web', label: '🌐 Web Application' },
+] as const;
 
-const PANEL_ITEMS = [
-  { value: 'modules', label: 'Execution Modules', icon: ListChecks },
-  { value: 'settings', label: 'Execution Settings', icon: Settings2 },
-];
+type Platform = typeof PLATFORM_TABS[number]['value'];
 
 const SOURCE_REF_CONFIG: Record<string, { label: string; placeholder: string; isUrl: boolean }> = {
-  web_url: { label: 'Web URL', placeholder: 'https://example.com', isUrl: true },
+  web_url: { label: 'Website URL', placeholder: 'https://example.com', isUrl: true },
   play_store_url: { label: 'Play Store URL', placeholder: 'https://play.google.com/store/apps/details?id=...', isUrl: true },
   app_store_url: { label: 'App Store URL', placeholder: 'https://apps.apple.com/app/...', isUrl: true },
-  flutter: { label: 'File name or URL', placeholder: 'app-release.apk or https://example.com', isUrl: false },
-  react_native: { label: 'File name or URL', placeholder: 'app-release.apk or https://example.com', isUrl: false },
-  hybrid: { label: 'File name or URL', placeholder: 'app-release.apk or https://example.com', isUrl: false },
 };
 
-const MOBILE_ACCEPT = '.apk,.aab,.ipa';
+const ANDROID_ACCEPT = '.apk,.aab';
+const IOS_ACCEPT = '.ipa';
 const MOBILE_TYPE_LABEL: Record<string, string> = { apk: 'Android APK', aab: 'Android App Bundle', ipa: 'iOS IPA' };
 
 /** Detect the real binary type from the uploaded file's extension — the
- * nav only offers one unified "Mobile Application" option, but the backend
- * (QaProject.sourceType, PLATFORM_BY_SOURCE, app-file-parser) still requires
- * the exact 'apk' | 'aab' | 'ipa' value, so we derive it client-side rather
- * than changing any backend contract. */
+ * backend (QaProject.sourceType, PLATFORM_BY_SOURCE, app-file-parser) still
+ * requires the exact 'apk' | 'aab' | 'ipa' value, so we derive it client-side
+ * rather than changing any backend contract. */
 function detectMobileType(filename: string): 'apk' | 'aab' | 'ipa' | null {
   const ext = filename.toLowerCase().split('.').pop();
   if (ext === 'apk' || ext === 'aab' || ext === 'ipa') return ext;
@@ -240,15 +239,29 @@ function LogFeed({ logs, autoScroll }: { logs: any[]; autoScroll: boolean }) {
 
 export default function TestCaseExecutionPage() {
   const [pending, startTransition] = useTransition();
-  const [sourceType, setSourceType] = useState('web_url');
-  const [configView, setConfigView] = useState('web_url');
+  const [stopping, setStopping] = useState(false);
+  const [, startCancel] = useTransition();
+  const [platform, setPlatform] = useState<Platform>('android');
+  // Android/iOS each offer two ways to supply the app: a store URL, or a
+  // direct binary upload. Web has only a URL — no mode toggle needed.
+  const [androidMode, setAndroidMode] = useState<'url' | 'file'>('url');
+  const [iosMode, setIosMode] = useState<'url' | 'file'>('url');
   const [fileName, setFileName] = useState('');
   const [appFileName, setAppFileName] = useState('');
   const [detectedMobileType, setDetectedMobileType] = useState<'apk' | 'aab' | 'ipa' | null>(null);
-  const [sheetPreview, setSheetPreview] = useState<SheetPreview | null>(null);
   const [sheetPreviewError, setSheetPreviewError] = useState<string | null>(null);
+  const [repositoryModalOpen, setRepositoryModalOpen] = useState(false);
+  const [selectedSheet, setSelectedSheet] = useState<{ id: string; sheetName: string; versionLabel: string; totalTestCases: number } | null>(null);
   const [urlValidation, setUrlValidation] = useState<{ valid: boolean; message: string } | null>(null);
-  const isBinarySource = sourceType === 'mobile';
+  const [isDraggingAppFile, setIsDraggingAppFile] = useState(false);
+  const [isDraggingSheet, setIsDraggingSheet] = useState(false);
+  // A sheet file dropped directly on the trigger, before the repository popup
+  // was even open — fast-tracked into its Upload New Sheet dialog.
+  const [pendingSheetFile, setPendingSheetFile] = useState<File | null>(null);
+
+  const isBinarySource = (platform === 'android' && androidMode === 'file') || (platform === 'ios' && iosMode === 'file');
+  // The URL-based sourceType for the current tab, when not uploading a binary.
+  const urlSourceType = platform === 'web' ? 'web_url' : platform === 'android' ? 'play_store_url' : 'app_store_url';
 
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<any>(null);
@@ -288,25 +301,28 @@ export default function TestCaseExecutionPage() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [runId]);
 
-  function selectSourceNav(value: string) {
-    setSourceType(value);
-    setConfigView(value);
+  function selectPlatform(value: Platform) {
+    setPlatform(value);
     setAppFileName('');
     setDetectedMobileType(null);
     setUrlValidation(null);
   }
 
-  async function onTestCaseFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    setFileName(file?.name ?? '');
-    setSheetPreview(null);
+  function acceptAppFile(file: File | null) {
+    setAppFileName(file?.name ?? '');
+    setDetectedMobileType(file ? detectMobileType(file.name) : null);
+  }
+
+  async function onRepositorySheetSelected(sheet: { id: string; sheetName: string; versionIndex: number; versionLabel: string; totalTestCases: number }) {
+    setSelectedSheet({ id: sheet.id, sheetName: sheet.sheetName, versionLabel: sheet.versionLabel, totalTestCases: sheet.totalTestCases });
+    setFileName(sheet.sheetName);
     setSheetPreviewError(null);
-    if (!file) return;
     try {
-      const preview = await parseSheetPreview(file);
-      setSheetPreview(preview);
+      const res = await fetch(`/api/qa/sheets/${sheet.id}`);
+      const data = await res.json();
+      if (data.error) setSheetPreviewError(data.error);
     } catch {
-      setSheetPreviewError('Could not preview this file — it will still be validated when execution starts.');
+      setSheetPreviewError('Could not load this sheet — it will still be validated when execution starts.');
     }
   }
 
@@ -325,16 +341,36 @@ export default function TestCaseExecutionPage() {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
 
+    if (!selectedSheet) {
+      toast.error('Select a test case sheet from the repository.');
+      return;
+    }
+
     if (isBinarySource) {
       if (!detectedMobileType) {
-        toast.error('Upload a valid .apk, .aab, or .ipa file.');
+        toast.error(platform === 'android' ? 'Upload a valid .apk or .aab file.' : 'Upload a valid .ipa file.');
+        return;
+      }
+      if (platform === 'android' && detectedMobileType === 'ipa') {
+        toast.error('That looks like an iOS .ipa file — switch to iOS Application to upload it.');
+        return;
+      }
+      if (platform === 'ios' && detectedMobileType !== 'ipa') {
+        toast.error('iOS Application only accepts .ipa files.');
         return;
       }
       formData.set('sourceType', detectedMobileType);
       formData.set('mode', 'uploaded');
     } else {
-      formData.set('sourceType', sourceType);
+      formData.set('sourceType', urlSourceType);
     }
+
+    // The Test Case Repository sheet selected above — loaded directly by the
+    // server from the repository, no re-upload of the file needed.
+    formData.set('sheetId', selectedSheet.id);
+
+    // Run on the device picked in QA → Devices, when one is selected.
+    attachSelectedDevice(formData);
 
     startTransition(async () => {
       // Binary APK/AAB/IPA uploads go through a Route Handler instead of this
@@ -351,8 +387,6 @@ export default function TestCaseExecutionPage() {
       setRunId(res.runId ?? null);
     });
   }
-
-  const isLive = run && (run.status === 'running' || run.status === 'queued');
 
   const moduleOptions = useMemo(
     () => Array.from(new Set(testCases.map((t) => t.module).filter(Boolean))).sort(),
@@ -439,6 +473,35 @@ export default function TestCaseExecutionPage() {
 
   const configReady = fileName && (isBinarySource ? !!detectedMobileType : true);
 
+  // The Stop control only makes sense once execution has actually started,
+  // and is disabled as soon as a stop has been requested (locally, or already
+  // recorded server-side) so it can't be pressed twice.
+  const isRunning = run?.status === 'running';
+  const stopRequested = stopping || run?.status === 'cancelled' || run?.currentStep === 'Cancelling…';
+  // Once a run reaches any terminal state, the config form (and its Start
+  // Execution button) stays hidden forever with no way back — this is exactly
+  // what reads as "the button stopped working". Offer an explicit reset.
+  const runIsTerminal = run && ['passed', 'failed', 'partial', 'cancelled'].includes(run.status);
+
+  function onNewExecution() {
+    setRunId(null);
+    setRun(null);
+    setLogs([]);
+    setScreenshots([]);
+    setBugs([]);
+    setTestCases([]);
+  }
+
+  function onStop() {
+    if (!runId) return;
+    if (!confirm('Stop this execution? It will end now and any partial results collected so far are saved.')) return;
+    setStopping(true);
+    startCancel(async () => {
+      const res = await cancelQaTestRun(runId);
+      if (res?.error) { setStopping(false); toast.error(res.error); } else toast.success('Stopping run…');
+    });
+  }
+
   return (
     <div className="mx-auto max-w-[1800px] space-y-4 p-4 lg:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -452,6 +515,17 @@ export default function TestCaseExecutionPage() {
           <div className="flex items-center gap-2">
             <span className={cn('h-2 w-2 rounded-full', RUN_STATUS_DOT[run.status])} />
             <Badge className={RUN_STATUS_COLOR[run.status] ?? ''}>{run.status}</Badge>
+            {isRunning && (
+              <Button size="sm" variant="outline" className="gap-1.5" disabled={stopRequested} onClick={onStop}>
+                {stopRequested ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+                {stopRequested ? 'Stopping…' : 'Stop Execution'}
+              </Button>
+            )}
+            {runIsTerminal && (
+              <Button size="sm" className="gap-1.5" onClick={onNewExecution}>
+                <RefreshCw className="h-3.5 w-3.5" /> New Execution
+              </Button>
+            )}
             <Link href={`/qa/runs/${runId}`} className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
               Full Run Page <ExternalLink className="h-3 w-3" />
             </Link>
@@ -459,77 +533,98 @@ export default function TestCaseExecutionPage() {
         )}
       </div>
 
-      {/* SECTION 1 — Configuration, full-width horizontal row */}
-      <Card className="border-border bg-card/60 p-3 backdrop-blur">
-        <h2 className="mb-2 px-1 font-display text-xs font-semibold uppercase tracking-wide text-muted-foreground">Test Run Configuration</h2>
-        <div className="flex flex-wrap items-center gap-2">
-          {SOURCE_TYPES.map((s) => (
-            <button
-              key={s.value}
-              type="button"
-              onClick={() => selectSourceNav(s.value)}
-              className={cn(
-                'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition',
-                configView === s.value ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground hover:bg-secondary/70',
-              )}
-            >
-              <span>{s.label}</span>
-              {sourceType === s.value && configView !== s.value && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />}
-            </button>
-          ))}
-          <div className="mx-1 h-6 w-px shrink-0 bg-border" />
-          {PANEL_ITEMS.map((p) => (
-            <button
-              key={p.value}
-              type="button"
-              onClick={() => setConfigView(p.value)}
-              className={cn(
-                'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition',
-                configView === p.value ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground hover:bg-secondary/70',
-              )}
-            >
-              <p.icon className="h-3.5 w-3.5 shrink-0" />
-              <span>{p.label}</span>
-            </button>
-          ))}
-          <div className="ml-auto shrink-0 rounded-lg border border-border bg-secondary/20 px-2.5 py-1.5 text-[10px] text-muted-foreground">
-            {configReady ? '✓ Ready to execute' : '○ Configuration incomplete'}
-          </div>
-        </div>
-      </Card>
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_340px] xl:items-start">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_355px] xl:items-start">
         {/* SECTION 2 — Main workspace (70%) */}
         <div className="space-y-4">
+          {/* SECTION 1 — Configuration, now the first item in the main column */}
+          <Card className="border-border bg-card/60 p-3 backdrop-blur">
+            <h2 className="mb-2 px-1 font-display text-xs font-semibold uppercase tracking-wide text-muted-foreground">Test Run Configuration</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              {PLATFORM_TABS.map((s) => (
+                <button
+                  key={s.value}
+                  type="button"
+                  onClick={() => selectPlatform(s.value)}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition',
+                    platform === s.value ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground hover:bg-secondary/70',
+                  )}
+                >
+                  <span>{s.label}</span>
+                </button>
+              ))}
+              <div className="ml-auto shrink-0 rounded-lg border border-border bg-secondary/20 px-2.5 py-1.5 text-[10px] text-muted-foreground">
+                {configReady ? '✓ Ready to execute' : '○ Configuration incomplete'}
+              </div>
+            </div>
+          </Card>
+
           {!runId ? (
             <Card className="border-border bg-card/60 p-5 backdrop-blur">
               <form onSubmit={onSubmit} className="space-y-4">
-                {/* Mobile upload — always mounted, visibility toggled so the
-                    selected File survives switching between nav items. */}
-                <div className={cn('space-y-2', configView === 'mobile' ? 'block' : 'hidden')}>
-                  <Label htmlFor="appFile">Upload APK / AAB / IPA *</Label>
+                {/* Android/iOS: choose store URL vs direct binary upload. Web
+                    has only a URL, so no toggle is shown for it. */}
+                {(platform === 'android' || platform === 'ios') && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => (platform === 'android' ? setAndroidMode('url') : setIosMode('url'))}
+                      className={cn(
+                        'flex-1 rounded-lg border px-3 py-2 text-xs font-medium transition',
+                        (platform === 'android' ? androidMode : iosMode) === 'url'
+                          ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:bg-secondary/40',
+                      )}
+                    >
+                      {platform === 'android' ? 'Play Store URL' : 'App Store URL'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => (platform === 'android' ? setAndroidMode('file') : setIosMode('file'))}
+                      className={cn(
+                        'flex-1 rounded-lg border px-3 py-2 text-xs font-medium transition',
+                        (platform === 'android' ? androidMode : iosMode) === 'file'
+                          ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:bg-secondary/40',
+                      )}
+                    >
+                      {platform === 'android' ? 'Upload APK' : 'Upload IPA'}
+                    </button>
+                  </div>
+                )}
+
+                {/* Binary upload — always mounted, visibility toggled so the
+                    selected File survives switching between tabs. */}
+                <div className={cn('space-y-2', isBinarySource ? 'block' : 'hidden')}>
+                  <Label htmlFor="appFile">{platform === 'android' ? 'Upload APK / AAB *' : 'Upload IPA *'}</Label>
                   <label
                     htmlFor="appFile"
-                    className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-border px-4 py-8 text-xs text-muted-foreground transition hover:bg-secondary/40"
+                    onDragOver={(e) => { e.preventDefault(); setIsDraggingAppFile(true); }}
+                    onDragLeave={() => setIsDraggingAppFile(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setIsDraggingAppFile(false);
+                      acceptAppFile(e.dataTransfer.files?.[0] ?? null);
+                    }}
+                    className={cn(
+                      'flex cursor-pointer items-center gap-2 rounded-lg border border-dashed px-4 py-8 text-xs transition',
+                      isDraggingAppFile ? 'border-primary bg-primary/5 text-primary' : 'border-border text-muted-foreground hover:bg-secondary/40',
+                    )}
                   >
                     <UploadCloud className="h-5 w-5 flex-shrink-0" />
                     {appFileName ? (
                       <span className="truncate text-foreground">{appFileName}</span>
+                    ) : isDraggingAppFile ? (
+                      <span>Drop it here…</span>
                     ) : (
-                      <span>Drag &amp; drop your .apk, .aab, or .ipa file, or click to browse.</span>
+                      <span>{platform === 'android' ? 'Drag & drop your .apk or .aab file, or click to browse.' : 'Drag & drop your .ipa file, or click to browse.'}</span>
                     )}
                     <input
                       id="appFile"
                       name="appFile"
                       type="file"
-                      accept={MOBILE_ACCEPT}
+                      accept={platform === 'android' ? ANDROID_ACCEPT : IOS_ACCEPT}
                       required={isBinarySource}
                       className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        setAppFileName(file?.name ?? '');
-                        setDetectedMobileType(file ? detectMobileType(file.name) : null);
-                      }}
+                      onChange={(e) => acceptAppFile(e.target.files?.[0] ?? null)}
                     />
                   </label>
                   {appFileName && (
@@ -553,22 +648,20 @@ export default function TestCaseExecutionPage() {
                   </p>
                 </div>
 
-                {/* Generic URL / file-ref source types share one input so the
-                    typed value is preserved regardless of which nav item is active. */}
-                <div className={cn('space-y-2', SOURCE_TYPES.some((s) => s.value === configView && s.value !== 'mobile') ? 'block' : 'hidden')}>
-                  <Label htmlFor="sourceRef">{SOURCE_REF_CONFIG[sourceType]?.label ?? 'Source URL'} *</Label>
+                {/* URL entry — Play Store / App Store / Website, one input
+                    shared across the three since only one is visible at a time. */}
+                <div className={cn('space-y-2', !isBinarySource ? 'block' : 'hidden')}>
+                  <Label htmlFor="sourceRef">{SOURCE_REF_CONFIG[urlSourceType].label} *</Label>
                   <div className="flex gap-2">
                     <Input
                       id="sourceRef"
                       name="sourceRef"
                       required={!isBinarySource}
-                      placeholder={SOURCE_REF_CONFIG[sourceType]?.placeholder}
+                      placeholder={SOURCE_REF_CONFIG[urlSourceType].placeholder}
                       onChange={() => setUrlValidation(null)}
                       className="flex-1"
                     />
-                    {SOURCE_REF_CONFIG[sourceType]?.isUrl && (
-                      <Button type="button" variant="outline" onClick={validateUrl} className="shrink-0 text-xs">Validate URL</Button>
-                    )}
+                    <Button type="button" variant="outline" onClick={validateUrl} className="shrink-0 text-xs">Validate URL</Button>
                   </div>
                   {urlValidation && (
                     <p className={cn('text-[11px] font-medium', urlValidation.valid ? 'text-emerald-500' : 'text-destructive')}>
@@ -577,119 +670,55 @@ export default function TestCaseExecutionPage() {
                   )}
                 </div>
 
-                {/* Upload Test Case Sheet — always available alongside whichever
-                    Source Type is selected, not a separate module. */}
-                <div className={cn('space-y-2 border-t border-border pt-4', SOURCE_TYPES.some((s) => s.value === configView) ? 'block' : 'hidden')}>
-                  <Label htmlFor="testCaseFile">Upload Excel / CSV *</Label>
-                  <label
-                    htmlFor="testCaseFile"
-                    className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-border px-4 py-8 text-xs text-muted-foreground transition hover:bg-secondary/40"
-                  >
-                    <UploadCloud className="h-5 w-5 flex-shrink-0" />
-                    {fileName ? (
-                      <span className="flex items-center gap-1.5 truncate text-foreground"><FileSpreadsheet className="h-3.5 w-3.5" /> {fileName}</span>
-                    ) : (
-                      <span>Drag &amp; drop your .xlsx or .csv file, or click to browse.</span>
+                {/* Test Case Repository — always available regardless of which
+                    platform tab is active. Sheets are selected from (or
+                    uploaded into) a centralized, versioned repository instead
+                    of being re-uploaded for every run. */}
+                <div className="space-y-2 border-t border-border pt-4">
+                  <Label>Test Case Sheet *</Label>
+                  <button
+                    type="button"
+                    onClick={() => setRepositoryModalOpen(true)}
+                    onDragOver={(e) => { e.preventDefault(); setIsDraggingSheet(true); }}
+                    onDragLeave={() => setIsDraggingSheet(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setIsDraggingSheet(false);
+                      const f = e.dataTransfer.files?.[0] ?? null;
+                      if (f) {
+                        // Opens the Test Case Repository popup with the
+                        // dropped file already loaded into Upload New Sheet,
+                        // preview included.
+                        setPendingSheetFile(f);
+                        setRepositoryModalOpen(true);
+                      }
+                    }}
+                    className={cn(
+                      'flex w-full cursor-pointer items-center gap-2 rounded-lg border border-dashed px-4 py-8 text-xs transition',
+                      isDraggingSheet ? 'border-primary bg-primary/5 text-primary' : 'border-border text-muted-foreground hover:bg-secondary/40',
                     )}
-                    <input
-                      id="testCaseFile"
-                      name="testCaseFile"
-                      type="file"
-                      accept=".xlsx,.xls,.csv"
-                      required
-                      className="hidden"
-                      onChange={onTestCaseFileChange}
-                    />
-                  </label>
+                  >
+                    {!selectedSheet && <FileSpreadsheet className="h-5 w-5 flex-shrink-0" />}
+                    {selectedSheet ? (
+                      <span className="flex flex-col items-start truncate text-left text-foreground">
+                        <span className="flex items-center gap-1.5 truncate"><FileSpreadsheet className="h-3.5 w-3.5 flex-shrink-0" /> {selectedSheet.sheetName}</span>
+                        <span className="text-[10px] text-muted-foreground">{selectedSheet.versionLabel} · {selectedSheet.totalTestCases} test case(s) · click to change</span>
+                      </span>
+                    ) : isDraggingSheet ? (
+                      <span>Drop it here…</span>
+                    ) : (
+                      <span>Click to select a sheet from the Test Case Repository, or drag & drop / upload a new one.</span>
+                    )}
+                  </button>
                   <p className="text-[11px] text-muted-foreground">
                     Columns: {REQUIRED_COLUMNS.join(', ')}. Order/casing flexible — headers auto-matched.
                   </p>
 
                   {sheetPreviewError && <p className="text-[11px] text-destructive">{sheetPreviewError}</p>}
-
-                  {sheetPreview && (
-                    <div className="space-y-3 rounded-lg border border-border p-3">
-                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                        <div><div className="text-[10px] text-muted-foreground">Test Case Count</div><div className="text-sm font-semibold">{sheetPreview.totalRows}</div></div>
-                        <div><div className="text-[10px] text-muted-foreground">Scenario Count</div><div className="text-sm font-semibold">{sheetPreview.totalRows}</div></div>
-                        <div><div className="text-[10px] text-muted-foreground">Modules Detected</div><div className="text-sm font-semibold">{sheetPreview.modules.length}</div></div>
-                      </div>
-
-                      <div>
-                        <div className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Header Mapping</div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {sheetPreview.headerMapping.map((h, i) => (
-                            <Badge key={i} variant={h.mapsTo ? 'secondary' : 'outline'} className="text-[10px]">
-                              {h.column} {h.mapsTo ? `→ ${h.mapsTo}` : '(unmapped)'}
-                            </Badge>
-                          ))}
-                        </div>
-                      </div>
-
-                      {sheetPreview.rows.length > 0 && (
-                        <div>
-                          <div className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Sheet Preview</div>
-                          <div className="overflow-x-auto rounded-md border border-border">
-                            <table className="w-full text-[10px]">
-                              <thead>
-                                <tr className="border-b border-border bg-secondary/30">
-                                  {sheetPreview.headers.map((h, i) => <th key={i} className="whitespace-nowrap px-2 py-1 text-left font-medium">{h}</th>)}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {sheetPreview.rows.map((row, ri) => (
-                                  <tr key={ri} className="border-b border-border last:border-0">
-                                    {row.map((cell, ci) => <td key={ci} className="max-w-[120px] truncate whitespace-nowrap px-2 py-1 text-muted-foreground">{String(cell)}</td>)}
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
 
-                {/* Execution Modules — real, derived from the uploaded sheet's Module column */}
-                <div className={cn('space-y-2', configView === 'modules' ? 'block' : 'hidden')}>
-                  <h3 className="font-display text-sm font-semibold">Execution Modules</h3>
-                  <p className="text-xs text-muted-foreground">
-                    Modules are detected automatically from your Test Case Sheet — no manual selection needed.
-                  </p>
-                  {sheetPreview && sheetPreview.modules.length > 0 ? (
-                    <div className="flex flex-wrap gap-1.5">
-                      {sheetPreview.modules.map((m) => (
-                        <Badge key={m} variant="secondary" className="gap-1 text-xs"><ListChecks className="h-3 w-3" /> {m}</Badge>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
-                      Upload a Test Case Sheet to see detected modules.
-                    </div>
-                  )}
-                </div>
-
-                {/* Execution Settings — real, accurate description of engine behavior */}
-                <div className={cn('space-y-2', configView === 'settings' ? 'block' : 'hidden')}>
-                  <h3 className="font-display text-sm font-semibold">Execution Settings</h3>
-                  <div className="space-y-2 text-xs">
-                    <div className="rounded-lg border border-border p-3">
-                      <div className="font-medium">AI Validation</div>
-                      <p className="mt-1 text-muted-foreground">The first 15 test cases are validated with live AI reasoning when an AI provider key is configured in Settings; remaining cases use deterministic rule-based validation.</p>
-                    </div>
-                    <div className="rounded-lg border border-border p-3">
-                      <div className="font-medium">Device Assignment</div>
-                      <p className="mt-1 text-muted-foreground">A simulated device is automatically assigned per run — no manual device selection is required.</p>
-                    </div>
-                    <div className="rounded-lg border border-border p-3">
-                      <div className="font-medium">Build Version</div>
-                      <p className="mt-1 text-muted-foreground">Automatically derived from the uploaded application; defaults to 1.0.0 when unavailable.</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="border-t border-border pt-4">
+                <div className="space-y-3 border-t border-border pt-4">
+                  <SelectedDeviceBanner show={isBinarySource || (platform === 'android' && androidMode === 'url')} />
                   <Button type="submit" disabled={pending} className="w-full gap-2">
                     {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                     Start Execution
@@ -717,7 +746,6 @@ export default function TestCaseExecutionPage() {
                 />
                 <StatCard label="Execution Time" value={elapsedLabel(run.startedAt)} icon={Timer} />
                 <StatCard label="Avg. Execution Time" value={avgExecutionSeconds != null ? `${avgExecutionSeconds.toFixed(1)}s` : '—'} icon={Clock} />
-                <StatCard label="ETA" value={run.etaSeconds != null ? `${run.etaSeconds}s` : '—'} icon={Hourglass} />
                 <StatCard label="Bugs Found" value={bugs.length} icon={BugIcon} accent={bugs.length > 0 ? 'text-destructive' : undefined} />
               </div>
 
@@ -810,30 +838,26 @@ export default function TestCaseExecutionPage() {
                         <TableHead>Test Case ID</TableHead>
                         <TableHead>Scenario</TableHead>
                         <TableHead>Module</TableHead>
-                        <TableHead>Priority</TableHead>
                         <TableHead>Status</TableHead>
-                        <TableHead>Device</TableHead>
                         <TableHead>Platform</TableHead>
                         <TableHead>Bugs</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {filteredTestCases.length === 0 ? (
-                        <TableRow><TableCell colSpan={9} className="py-8 text-center text-xs text-muted-foreground">No test cases match these filters.</TableCell></TableRow>
+                        <TableRow><TableCell colSpan={7} className="py-8 text-center text-xs text-muted-foreground">No test cases match these filters.</TableCell></TableRow>
                       ) : filteredTestCases.map((t) => (
                         <TableRow key={t.id}>
                           <TableCell><Checkbox checked={selected.has(t.id)} onCheckedChange={() => toggleSelect(t.id)} /></TableCell>
                           <TableCell className="font-mono text-xs">{t.testCaseId}</TableCell>
                           <TableCell className="max-w-[200px] truncate text-xs" title={t.scenario ?? t.name}>{t.scenario ?? t.name}</TableCell>
                           <TableCell className="text-xs">{t.module}</TableCell>
-                          <TableCell><Badge variant="outline" className="text-[10px] uppercase">{t.priority}</Badge></TableCell>
                           <TableCell>
                             <span className="inline-flex items-center gap-1.5">
                               <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[t.result])} />
                               <Badge className={`${STATUS_BADGE[t.result] ?? ''} text-[10px]`}>{t.result}</Badge>
                             </span>
                           </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{run.currentDevice ?? '—'}</TableCell>
                           <TableCell className="text-xs capitalize text-muted-foreground">{run.project?.platform ?? '—'}</TableCell>
                           <TableCell className="text-xs">{t.bugId ? 1 : 0}</TableCell>
                         </TableRow>
@@ -853,13 +877,13 @@ export default function TestCaseExecutionPage() {
         <div className="space-y-4 xl:sticky xl:top-4">
           <Card className="border-border bg-card/60 p-4 backdrop-blur">
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-display text-xs font-semibold">{run?.engineMode === 'real_browser' ? 'Live Browser' : 'Live Device'}</h2>
+              <h2 className="font-display text-xs font-semibold">Live Tracking</h2>
               {run && <Badge variant="secondary" className="text-[10px]">{run.engineMode === 'real_browser' ? 'Real' : 'Simulated'}</Badge>}
             </div>
             {!run ? (
-              <Skeleton className="aspect-[9/16] max-h-56 w-full rounded-xl" />
+              <Skeleton className="mx-auto aspect-[9/16] max-h-[420px] w-full rounded-xl" />
             ) : (
-              <div className="grid aspect-[9/16] max-h-56 place-items-center overflow-hidden rounded-xl border border-border bg-secondary/20">
+              <div className="mx-auto grid aspect-[9/16] max-h-[420px] place-items-center overflow-hidden rounded-xl border border-border bg-secondary/20">
                 {screenshots.length > 0 ? (
                   <img src={screenshots[screenshots.length - 1].imageDataUrl} alt="Current screen" className="h-full w-full object-cover object-top" />
                 ) : run.engineMode === 'real_browser' ? (
@@ -867,26 +891,6 @@ export default function TestCaseExecutionPage() {
                 ) : (
                   <Smartphone className="h-8 w-8 text-muted-foreground" />
                 )}
-              </div>
-            )}
-            {run && (
-              <div className="mt-3 space-y-1 text-[11px]">
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Device Name</span><span className="max-w-[60%] truncate">{run.currentDevice ?? '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Current Screen</span><span className="max-w-[60%] truncate">{run.currentScreen ?? '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">App Version</span><span>{run.buildVersion ?? '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Battery className="h-3 w-3" /> Battery</span><span>{isLive ? '78%' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Cpu className="h-3 w-3" /> CPU</span><span>{isLive ? '34%' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><MemoryStick className="h-3 w-3" /> Memory</span><span>{isLive ? '512 MB' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Signal className="h-3 w-3" /> Network</span><span>{isLive ? 'Wi-Fi' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Wifi className="h-3 w-3" /> Resolution</span><span>1080×2400</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Orientation</span><span>Portrait</span></div>
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Status</span>
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className={cn('h-1.5 w-1.5 rounded-full', isLive ? 'bg-emerald-500' : 'bg-muted-foreground')} />
-                    {isLive ? 'Online' : 'Offline'}
-                  </span>
-                </div>
               </div>
             )}
           </Card>
@@ -1035,6 +1039,14 @@ export default function TestCaseExecutionPage() {
           </Tabs>
         </Card>
       )}
+
+      <TestCaseSheetModal
+        open={repositoryModalOpen}
+        onOpenChange={setRepositoryModalOpen}
+        onSelect={onRepositorySheetSelected}
+        pendingFile={pendingSheetFile}
+        onPendingFileConsumed={() => setPendingSheetFile(null)}
+      />
     </div>
   );
 }

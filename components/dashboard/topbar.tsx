@@ -22,8 +22,8 @@ export function Topbar({ title, subtitle }: { title: string; subtitle?: string }
   return (
     <header className="sticky top-0 z-20 flex h-16 items-center gap-4 border-b border-border bg-background/80 px-6 backdrop-blur">
       <div className="min-w-0 flex-1">
-        <h1 className="truncate font-display text-lg font-semibold tracking-tight">{title}</h1>
-        {subtitle && <p className="truncate text-xs text-muted-foreground">{subtitle}</p>}
+        <h1 className="type-section-title truncate">{title}</h1>
+        {subtitle && <p className="type-caption truncate text-muted-foreground">{subtitle}</p>}
       </div>
 
       <div className="relative hidden md:block">

@@ -20,6 +20,10 @@ const qaIssueBoardSchema = new Schema({
   boardName: { type: String, required: true, index: true },
   projectName: { type: String, default: '' },
   applicationName: { type: String, default: '' },
+  /** App icon extracted from the uploaded binary, if any (data URL). */
+  applicationIconDataUrl: { type: String, default: null },
+  /** Board ids this board has been starred by, so favourites are per-user and persist across devices. */
+  favouritedBy: { type: [Schema.Types.ObjectId], ref: 'User', default: [] },
   /** Numeric run number of the source execution. */
   executionNumber: { type: Number, required: true, index: true },
   /** Zero-padded display form, e.g. "084". */
@@ -51,6 +55,9 @@ const qaIssueBoardSchema = new Schema({
   closedIssues: { type: Number, default: 0 },
   criticalIssues: { type: Number, default: 0 },
   highPriorityIssues: { type: Number, default: 0 },
+  /** Category rollups the board list surfaces directly on the card. */
+  functionalIssues: { type: Number, default: 0 },
+  uiIssues: { type: Number, default: 0 },
   /** Distinct assignee names, so the board list can filter by developer. */
   assignedDevelopers: { type: [String], default: [] },
   severities: { type: [String], default: [] },

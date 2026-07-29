@@ -19,8 +19,7 @@ export async function GET(req: Request) {
   const device = params.get('device') || null;
   const status = params.get('status') || null;
   const executedBy = params.get('executedBy')?.toLowerCase().trim() || null;
-  // moduleType: 'catalog' | 'uploaded' (which execution engine/module was used),
-  // or one of the QA_MODULES keys (functional, ui_ux, api, ...) for catalog runs.
+  // moduleType: 'catalog' (Test Execution) | 'uploaded' (AI Test Case Execution).
   const moduleType = params.get('moduleType') || null;
   const dateFrom = params.get('dateFrom') ? new Date(params.get('dateFrom') as string) : null;
   const dateTo = params.get('dateTo') ? new Date(params.get('dateTo') as string) : null;
@@ -36,7 +35,6 @@ export async function GET(req: Request) {
   if (executedBy) query.executedByName = { $regex: executedBy, $options: 'i' };
   if (device) query.currentDevice = { $regex: device, $options: 'i' };
   if (moduleType === 'catalog' || moduleType === 'uploaded') query.sourceMode = moduleType;
-  else if (moduleType) query.modules = moduleType;
   if (dateFrom || dateTo) {
     query.createdAt = {
       ...(dateFrom ? { $gte: dateFrom } : {}),

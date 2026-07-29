@@ -193,7 +193,7 @@ export default function QaRunPage() {
         </Link>
         <div className="flex-1">
           <h1 className="font-display text-xl font-semibold tracking-tight">{run.project?.name ?? 'Test Run'}</h1>
-          <p className="text-xs text-muted-foreground">RUN-{run.runNumber} · {run.modules?.length ?? 0} module(s) · {run.project?.sourceType}</p>
+          <p className="text-xs text-muted-foreground">RUN-{run.runNumber} · {run.sourceMode === 'uploaded' ? 'AI Test Case Execution' : 'Test Execution'} · {run.project?.sourceType}</p>
         </div>
         {run.engineMode === 'real_browser' && <Badge variant="outline" className="text-[10px]">Real Browser Execution</Badge>}
         {isRealDevice && <Badge variant="outline" className="text-[10px]">Real Device Execution</Badge>}

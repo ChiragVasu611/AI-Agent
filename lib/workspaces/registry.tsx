@@ -1,6 +1,6 @@
 import {
   BarChart3, Briefcase, Bug, Calendar, CheckSquare, DollarSign, FileSearch, FileText, History, KanbanSquare, LayoutDashboard,
-  PlayCircle, ScrollText, Search, Settings, Smartphone, Sparkles, Target, TrendingUp, Trophy, UserCheck, Users,
+  PlayCircle, Search, Settings, Smartphone, Sparkles, Target, TrendingUp, Trophy, UserCheck, Users,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -49,8 +49,8 @@ export const WORKSPACES: Record<string, WorkspaceConfig> = {
       { label: 'Test Execution', href: '/qa/test-execution', icon: PlayCircle },
       { label: 'AI Test Case Execution', href: '/qa/test-case-execution', icon: Sparkles },
       { label: 'Test Runs', href: '/qa/runs', icon: History },
-      { label: 'Execution Reports', href: '/qa/execution-reports', icon: ScrollText },
       { label: 'Analytics', href: '/qa/reports', icon: BarChart3 },
+      { label: 'AI Issue Boards', href: '/qa/issue-boards', icon: KanbanSquare },
       { label: 'Devices', href: '/qa/devices', icon: Smartphone },
       { label: 'Crash Reports', href: '/qa/crash-reports', icon: Bug },
       { label: 'Settings', href: '/qa/settings', icon: Settings },
