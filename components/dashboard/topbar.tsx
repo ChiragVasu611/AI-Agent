@@ -106,26 +106,28 @@ export function Topbar({
 
       <DropdownMenu open={notifOpen} onOpenChange={setNotifOpen}>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
+          <Button variant="ghost" size="icon" aria-label="Notifications">
             <Bell className="h-[18px] w-[18px]" />
-            <span aria-hidden="true" className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-primary ring-2 ring-background" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-72">
           <div className="px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             Notifications
           </div>
-          <DropdownMenuItem className="flex flex-col items-start gap-1">
-            <div className="flex w-full items-center justify-between">
-              <span className="text-sm font-medium">Pipeline completed</span>
-              <Badge variant="secondary" className="text-[10px]">2m</Badge>
-            </div>
-            <span className="text-xs text-muted-foreground">Your App Factory build passed QA.</span>
-          </DropdownMenuItem>
-          <DropdownMenuItem className="flex flex-col items-start gap-1">
-            <span className="text-sm font-medium">Credits topped up</span>
-            <span className="text-xs text-muted-foreground">100 credits added to your account.</span>
-          </DropdownMenuItem>
+          {/*
+            The two entries previously listed here ("Pipeline completed",
+            "Credits topped up") were hard-coded fabrications shown to every user
+            on every page, as was the unread dot on the bell. There is no
+            notification feed behind this menu yet, so it now says so instead of
+            inventing events. Workspaces that DO have a real feed render their own
+            bell (e.g. HrNotificationsBell, issue-boards bell) — those are
+            untouched.
+          */}
+          <div className="px-3 pb-3 pt-1">
+            <p className="type-caption text-muted-foreground">
+              You have no notifications.
+            </p>
+          </div>
         </DropdownMenuContent>
       </DropdownMenu>
 

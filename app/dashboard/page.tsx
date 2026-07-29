@@ -4,6 +4,8 @@ import { getCurrentUser } from '@/lib/auth/session';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { Project } from '@/lib/mongodb/models/Project';
 import { serializeDoc } from '@/lib/mongodb/serialize';
+import { AGENTS } from '@/lib/ai/agents';
+import { DESIGN_AGENTS } from '@/lib/ai/design-agents';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -77,7 +79,12 @@ export default async function DashboardHome() {
   // Identical derivations to before — same filters, same values, same order.
   const activeProjects = projects.filter((p) => p.status !== 'completed' && p.status !== 'failed').length;
   const completedBuilds = projects.filter((p) => p.status === 'completed').length;
-  const agentsOnline = 16;
+  /**
+   * Derived from the real agent registries instead of the previous hard-coded
+   * `16` — which happened to equal AGENTS (8) + DESIGN_AGENTS (8) but would have
+   * silently gone stale the moment an agent was added or removed.
+   */
+  const agentsOnline = AGENTS.length + DESIGN_AGENTS.length;
 
   // Computed from the catalogue rather than hard-coded, so the summary can never
   // drift out of sync with the module list (the previous static "3 live · 3
