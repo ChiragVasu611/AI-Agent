@@ -47,15 +47,30 @@ export interface ValidationOutcome {
 const NEGATION_RE = /\b(?:not|no longer|shouldn'?t|should not|must not|never)\b/i;
 
 /**
+ * Interrogative idioms that contain "not" but assert nothing either way: "check
+ * if the button is cut off or not", "verify the label is true or false". These
+ * ask *whether*, they don't assert a negative, so they must never flip a
+ * verdict. Global on purpose — a sheet step routinely asks this twice in one
+ * sentence ("cut off or not ... GIF load or not"), and stripping only the first
+ * occurrence leaves a stray "not" behind that still reads as a negation. This
+ * exact gap (present on the Android validator until fixed there) inverted a
+ * real "element not found" failure into a false PASS.
+ */
+const INTERROGATIVE_RE = /\b(?:or\s+not|whether(?:\s+or\s+not)?|true\s+or\s+false|yes\s+or\s+no)\b/gi;
+
+/**
  * Whether the expectation is phrased negatively ("should NOT be displayed").
  *
  * Quoted literals are stripped first: they are the *subject* being asserted on,
  * not assertion grammar. Without this, an expectation like
  *   Text "This Does Not Exist" is displayed
  * reads as negated and inverts to a false PASS when the text is genuinely absent.
+ * Interrogative idioms are stripped next, before the negation check runs, so
+ * their embedded "not" cannot be mistaken for a real negation.
  */
 function isNegated(expected: string): boolean {
-  return NEGATION_RE.test(expected.replace(/["'“”‘’][^"'“”‘’]*["'“”‘’]/g, ' '));
+  const bare = expected.replace(/["'“”‘’][^"'“”‘’]*["'“”‘’]/g, ' ');
+  return NEGATION_RE.test(bare.replace(INTERROGATIVE_RE, ' '));
 }
 
 /** Quoted literal inside an expectation is the exact text to look for. */

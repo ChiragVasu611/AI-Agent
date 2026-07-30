@@ -11,13 +11,23 @@ import type { StepAction } from '@/lib/qa/step-interpreter';
 import {
   dumpUi, findNode, inputText, pressKey, screenSize, shell, swipe, tap, visibleText,
   foregroundPackage, waitForUiSettle, uiSignature, currentActivity, waitForAppReady,
-  findForwardAffordance, resolveTappable,
+  findForwardAffordance, resolveTappable, waitForUiChange,
   type UiNode,
 } from '@/lib/qa/android-bridge';
 
 export interface AndroidStepResult {
   ok: boolean;
   detail: string;
+  /**
+   * Screen state either side of the interaction, when the branch computed it.
+   * Lets an Expected Result like "user should move to Onboarding 2" be asserted
+   * on whether the screen genuinely advanced, rather than by hunting for the
+   * words "user"/"move" in the on-screen text.
+   */
+  beforeSignature?: string;
+  beforeActivity?: string | null;
+  afterSignature?: string;
+  afterActivity?: string | null;
 }
 
 /**
@@ -26,7 +36,7 @@ export interface AndroidStepResult {
  * callers can compare it against the pre-action state.
  */
 async function settleAfterAction(serial: string, timeoutMs = 12000) {
-  return waitForUiSettle(serial, { timeoutMs, pollMs: 600, stableChecks: 2 });
+  return waitForUiSettle(serial, { timeoutMs });
 }
 
 /**
@@ -86,10 +96,14 @@ export async function executeAndroidStep(
         const label = found.node.text || found.node.contentDesc;
         await tap(serial, found.node.center.x, found.node.center.y);
         const after = await settleAfterAction(serial);
+        const transition = {
+          beforeSignature: before, beforeActivity,
+          afterSignature: after.signature, afterActivity: after.activity,
+        };
         if (after.signature === before && after.activity === beforeActivity) {
-          return { ok: false, detail: `Tapped "${label}" (${found.intent}) but the screen did not change — the app did not move forward.` };
+          return { ok: false, detail: `Tapped "${label}" (${found.intent}) but the screen did not change — the app did not move forward.`, ...transition };
         }
-        return { ok: true, detail: `Moved forward by tapping "${label}" (${found.intent}); now on ${after.activity ?? 'the next screen'}.` };
+        return { ok: true, detail: `Moved forward by tapping "${label}" (${found.intent}); now on ${after.activity ?? 'the next screen'}.`, ...transition };
       }
 
       case 'click': {
@@ -123,17 +137,21 @@ export async function executeAndroidStep(
         const after = await settleAfterAction(serial);
         const label = node.text || node.contentDesc || action.target;
 
+        const transition = {
+          beforeSignature: before, beforeActivity,
+          afterSignature: after.signature, afterActivity: after.activity,
+        };
         // Nothing moved at all — the tap did not register.
         if (after.signature === before && after.activity === beforeActivity) {
-          return { ok: false, detail: `Tapped "${label}" at (${node.center.x}, ${node.center.y}) but the screen did not change at all — the tap had no effect. Still on ${after.activity ?? 'the same screen'}.` };
+          return { ok: false, detail: `Tapped "${label}" at (${node.center.x}, ${node.center.y}) but the screen did not change at all — the tap had no effect. Still on ${after.activity ?? 'the same screen'}.`, ...transition };
         }
         // Never settling is only a real problem when the resulting screen has
         // nothing to interact with — an app with a clock or looping animation
         // legitimately never goes static, and must not be failed for it.
         if (!after.settled && !hasUsableContent(after.nodes)) {
-          return { ok: false, detail: `Tapped "${label}" but the app is still loading after 12s with no interactive content on ${after.activity ?? 'an unknown screen'} — it appears stuck.` };
+          return { ok: false, detail: `Tapped "${label}" but the app is still loading after 12s with no interactive content on ${after.activity ?? 'an unknown screen'} — it appears stuck.`, ...transition };
         }
-        return { ok: true, detail: `Tapped "${label}" at (${node.center.x}, ${node.center.y}); screen advanced to ${after.activity ?? 'the next view'}.` };
+        return { ok: true, detail: `Tapped "${label}" at (${node.center.x}, ${node.center.y}); screen advanced to ${after.activity ?? 'the next view'}.`, ...transition };
       }
 
       case 'type': {
@@ -149,7 +167,9 @@ export async function executeAndroidStep(
           return { ok: false, detail: `No text field matching "${action.target}" was found. Visible elements: ${screenSummary(nodes)}.` };
         }
         await tap(serial, field.center.x, field.center.y);
-        await new Promise((r) => setTimeout(r, 400));
+        // Proceed as soon as the field takes focus (keyboard/cursor changes the
+        // hierarchy) rather than always pausing for the worst case.
+        await waitForUiChange(serial, uiSignature(nodes), 900);
         // Clear whatever the field already holds so the typed value is exact.
         // The node's own text tells us precisely how many deletes are needed.
         const existing = field.text?.length ?? 0;
@@ -206,13 +226,29 @@ export async function executeAndroidStep(
       case 'scroll': {
         const { width, height } = await screenSize(serial);
         const midX = Math.round(width / 2);
-        const up = action.value === 'up';
-        await swipe(
-          serial, midX, up ? Math.round(height * 0.3) : Math.round(height * 0.75),
-          midX, up ? Math.round(height * 0.75) : Math.round(height * 0.3), 350,
-        );
+        const midY = Math.round(height / 2);
+        const dir = action.value === 'up' || action.value === 'left' || action.value === 'right'
+          ? action.value : 'down';
+        // Horizontal gestures are how carousels and template rails are browsed;
+        // a vertical-only swipe silently did nothing on those screens.
+        const path = dir === 'left'
+          ? [Math.round(width * 0.8), midY, Math.round(width * 0.2), midY]
+          : dir === 'right'
+            ? [Math.round(width * 0.2), midY, Math.round(width * 0.8), midY]
+            : dir === 'up'
+              ? [midX, Math.round(height * 0.3), midX, Math.round(height * 0.75)]
+              : [midX, Math.round(height * 0.75), midX, Math.round(height * 0.3)];
+        await swipe(serial, path[0], path[1], path[2], path[3], 350);
         await settleAfterAction(serial, 8000);
-        return { ok: true, detail: `Scrolled ${up ? 'up' : 'down'}.` };
+        return { ok: true, detail: `Swiped ${dir}.` };
+      }
+
+      case 'volume': {
+        // A genuine hardware key press, repeated so the change is audible
+        // rather than a single imperceptible increment.
+        const code = action.value === 'down' ? 'KEYCODE_VOLUME_DOWN' : 'KEYCODE_VOLUME_UP';
+        await shell(serial, `input keyevent ${Array(5).fill(code).join(' ')}`, 20000);
+        return { ok: true, detail: `Pressed ${code} five times to turn the volume ${action.value === 'down' ? 'down' : 'up'}.` };
       }
 
       case 'wait': {
@@ -282,21 +318,109 @@ export interface AndroidValidation {
  */
 const NEGATION_RE = /\b(?:not|no longer|shouldn'?t|should not|must not|never)\b/i;
 
+/**
+ * Interrogative idioms that contain "not" but assert nothing either way:
+ * "check if the button is cut off or not", "verify the icon is true or false".
+ * These are the sheet asking *whether*, not asserting a negative — so they must
+ * never flip the verdict. Left in, "...is cut off or not" inverted a genuine
+ * "element not found" failure into a PASS.
+ */
+/**
+ * Global on purpose: a single sheet step routinely asks twice ("check the button
+ * is cut off or not and also check the GIF loads or not"). Stripping only the
+ * first phrase leaves a stray "not" behind, which reads as a negation and
+ * inverts a genuine failure into a PASS. Used only with .replace(), never
+ * .test(), because a /g regex carries lastIndex between test() calls.
+ */
+const INTERROGATIVE_RE = /\b(?:or\s+not|whether(?:\s+or\s+not)?|true\s+or\s+false|yes\s+or\s+no)\b/gi;
+
 function isNegated(expected: string): boolean {
   // Strip quoted subjects first — "This Does Not Exist" is a label, not grammar.
-  return NEGATION_RE.test(expected.replace(/["'“”‘’][^"'“”‘’]*["'“”‘’]/g, ' '));
+  const bare = expected.replace(/["'“”‘’][^"'“”‘’]*["'“”‘’]/g, ' ');
+  // Remove interrogative idioms before looking for a real negation, so the
+  // "not" inside "or not" cannot be mistaken for one.
+  const withoutIdioms = bare.replace(INTERROGATIVE_RE, ' ');
+  return NEGATION_RE.test(withoutIdioms);
 }
 
 function quoted(text: string): string | null {
   return text.match(/["'“”‘’]([^"'“”‘’]{2,})["'“”‘’]/)?.[1]?.trim() ?? null;
 }
 
+/**
+ * Words that describe the *act of testing* or generic UI furniture rather than
+ * anything that could literally be rendered on screen. A sheet writes "Title,
+ * description and Next button should display" — the words "title",
+ * "description" and "button" are describing the layout, they are not label text
+ * to search for. Requiring them verbatim is what made almost every case fail.
+ */
 const STOP_WORDS = new Set([
-  'the', 'a', 'an', 'is', 'are', 'be', 'should', 'must', 'will', 'to', 'of', 'and', 'or', 'on', 'in',
-  'at', 'with', 'for', 'that', 'this', 'it', 'user', 'app', 'application', 'screen', 'page',
-  'successfully', 'success', 'correctly', 'displayed', 'display', 'shown', 'show', 'visible',
-  'appear', 'appears', 'see', 'view', 'able', 'navigated', 'redirected', 'opens', 'open', 'without',
+  'the', 'a', 'an', 'is', 'are', 'be', 'been', 'was', 'were', 'should', 'must', 'will', 'would',
+  'can', 'could', 'to', 'of', 'and', 'or', 'on', 'in', 'at', 'with', 'for', 'from', 'that', 'this',
+  'it', 'its', 'they', 'them', 'their', 'user', 'users', 'app', 'application', 'screen', 'page',
+  'view', 'successfully', 'success', 'correctly', 'correct', 'properly', 'proper', 'perfectly',
+  'displayed', 'display', 'displays', 'shown', 'show', 'shows', 'visible', 'appear', 'appears',
+  'appere', 'see', 'watch', 'able', 'navigated', 'redirected', 'opens', 'open', 'without', 'any',
+  'issues', 'issue', 'also', 'again', 'after', 'before', 'then', 'when', 'while', 'each', 'every',
+  // The act of testing — never on-screen text.
+  'verify', 'verified', 'check', 'checked', 'validate', 'validated', 'assert', 'confirm', 'ensure',
+  'observe', 'expect', 'expected', 'test', 'testing',
+  // Generic UI furniture / layout vocabulary.
+  'title', 'titles', 'description', 'descriptions', 'button', 'buttons', 'btn', 'icon', 'icons',
+  'image', 'images', 'text', 'texts', 'label', 'labels', 'ui', 'element', 'elements', 'control',
+  'field', 'layout', 'design', 'content',
+  // Lifecycle / motion verbs that describe behaviour, not labels.
+  'launch', 'launches', 'launched', 'launching', 'load', 'loads', 'loaded', 'loading', 'laod',
+  'move', 'moves', 'moved', 'stay', 'stays', 'work', 'works', 'working', 'function', 'functions',
+  'play', 'plays', 'playing', 'scroll', 'scrolls', 'scrollable', 'slide', 'slides', 'select',
+  'selected', 'selection', 'randomly', 'random', 'click', 'clicking', 'clickable', 'tap', 'time',
+  'configured', 'automatically', 'smoothly', 'easily', 'directly', 'first', 'next', 'cut', 'off',
+  'stuck', 'crash', 'crashing', 'crashes', 'close', 'closed', 'name', 'names',
 ]);
+
+/**
+ * Claims about qualities a UI hierarchy simply does not expose: video playback,
+ * audio, animation smoothness, elapsed timing, and pixel-level visual defects.
+ * These are honestly reported as not-machine-verifiable rather than guessed —
+ * asserting them either way would be fabricating a result.
+ */
+const UNVERIFIABLE_RE = /\b(?:video|audio|sound|audible|volume|gif|animation|animate|smooth(?:ly)?|duration|second|seconds|fps|frame\s*rate|blurry|overlap|cut\s*off|pixel|colour|color\s+(?:match|correct))\b/i;
+
+/** Structural claims that CAN be checked against the live hierarchy. */
+const SCROLLABLE_RE = /\bscroll(?:able|ing)?\b/i;
+const PROGRESSION_RE = /\b(?:move|moves|moved|navigate[ds]?|redirect(?:ed)?|go(?:es)?\s+to|proceed|next\s+screen|following\s+screen|new\s+screen|should\s+appear|should\s+open)\b/i;
+const CLICKABLE_CLAIM_RE = /\b(?:clickable|tappable|enabled|be\s+able\s+to\s+(?:click|tap|press))\b/i;
+
+export interface ValidationContext {
+  /** UI signature captured immediately before the step ran, for progression. */
+  beforeSignature?: string;
+  beforeActivity?: string | null;
+  /** Signature/activity after the step settled. */
+  afterSignature?: string;
+  afterActivity?: string | null;
+}
+
+interface ClauseVerdict {
+  status: 'pass' | 'fail' | 'inconclusive';
+  detail: string;
+  assertion: string;
+}
+
+/** Split "1. foo\n2. bar" or "foo, and bar" into independently checkable claims. */
+function splitClauses(expected: string): string[] {
+  const byNumber = expected
+    .split(/(?:^|\n)\s*\d+[.)]\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (byNumber.length > 1) return byNumber;
+  return [expected.trim()];
+}
+
+function contentWords(text: string): string[] {
+  return text
+    .toLowerCase().replace(/[^\w\s-]/g, ' ').split(/\s+/)
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+}
 
 /**
  * Validate a test case's Expected Result against what is genuinely rendered on
@@ -306,62 +430,183 @@ export async function validateAndroidExpectation(
   serial: string,
   expectedRaw: string,
   pkg: string | null,
+  context: ValidationContext = {},
 ): Promise<AndroidValidation> {
   const expected = String(expectedRaw ?? '').trim();
   if (!expected) {
     return { status: 'inconclusive', actual: 'The sheet did not specify an Expected Result, so nothing could be asserted.', assertion: 'none' };
   }
 
-  const negated = isNegated(expected);
   const nodes = await dumpUi(serial);
   const screenText = visibleText(nodes).toLowerCase();
+  const fg = pkg ? await foregroundPackage(serial) : null;
 
-  // App-still-running assertions.
-  if (/\b(?:crash|close|closed|terminate|force stop)\b/i.test(expected) && pkg) {
-    const fg = await foregroundPackage(serial);
-    const stillUp = fg === pkg;
+  const verdicts: ClauseVerdict[] = [];
+  for (const clause of splitClauses(expected)) {
+    verdicts.push(await evaluateClause(clause, { serial, nodes, screenText, pkg, fg, context }));
+  }
+
+  // A definitive failure anywhere means the expected result was not met. Only
+  // when nothing failed and at least one clause was genuinely verified is the
+  // whole expectation a PASS — an all-inconclusive expectation is never
+  // upgraded to PASS, because nothing about it was actually proven.
+  const failed = verdicts.filter((v) => v.status === 'fail');
+  const passed = verdicts.filter((v) => v.status === 'pass');
+  const unknown = verdicts.filter((v) => v.status === 'inconclusive');
+  const describe = (list: ClauseVerdict[]) => list.map((v) => v.detail).join(' ');
+
+  if (failed.length > 0) {
     return {
-      status: stillUp !== negated ? 'pass' : 'fail',
-      actual: stillUp ? `${pkg} is still in the foreground.` : `${pkg} is no longer in the foreground (current: ${fg ?? 'none'}).`,
+      status: 'fail',
+      actual: describe(failed) + (passed.length > 0 ? ` (Verified separately: ${describe(passed)})` : ''),
+      assertion: failed.map((v) => v.assertion).join('+'),
+    };
+  }
+  if (passed.length > 0) {
+    return {
+      status: 'pass',
+      actual: describe(passed) + (unknown.length > 0 ? ` Not machine-verifiable: ${describe(unknown)}` : ''),
+      assertion: passed.map((v) => v.assertion).join('+'),
+    };
+  }
+  return {
+    status: 'inconclusive',
+    actual: describe(unknown),
+    assertion: unknown.map((v) => v.assertion).join('+') || 'none',
+  };
+}
+
+/**
+ * Evaluate one claim from an Expected Result against the live screen, choosing
+ * the assertion class from the claim's own wording. Nothing here encodes a
+ * specific app's screens or flow — every check reads the live hierarchy.
+ */
+async function evaluateClause(
+  clause: string,
+  ctx: {
+    serial: string; nodes: UiNode[]; screenText: string;
+    pkg: string | null; fg: string | null; context: ValidationContext;
+  },
+): Promise<ClauseVerdict> {
+  const { nodes, screenText, pkg, fg, context } = ctx;
+  const negated = isNegated(clause);
+
+  // 1) Crash / app-alive claims. Stemmed, so "crashing" and "crashes" match too
+  //    — an unstemmed \bcrash\b missed "without crashing" and fell through to
+  //    keyword matching, which then demanded the word "crashing" on screen.
+  if (/\b(?:crash\w*|terminate\w*|force[\s-]?stop\w*|close[ds]?|exit\w*)\b/i.test(clause) && pkg) {
+    const stillUp = fg === pkg;
+    // "should launch without crashing" is satisfied by the app being alive;
+    // the negation is on "crashing", so a live app is the positive outcome.
+    return {
+      status: stillUp ? 'pass' : 'fail',
+      detail: stillUp
+        ? `The application is running in the foreground (${pkg}) with no crash.`
+        : `The application is not in the foreground (current: ${fg ?? 'none'}), so it did not stay running.`,
       assertion: 'app-foreground',
     };
   }
 
-  const literal = quoted(expected);
+  // 2) A quoted literal is the one thing a sheet states unambiguously.
+  const literal = quoted(clause);
   if (literal) {
     const found = screenText.includes(literal.toLowerCase());
     return {
       status: found !== negated ? 'pass' : 'fail',
-      actual: found
-        ? `Text "${literal}" is visible on the device screen.`
-        : `Text "${literal}" was not found on the device screen. Visible: ${screenSummary(nodes)}.`,
+      detail: found
+        ? `Text "${literal}" is visible on screen.`
+        : `Text "${literal}" was not found on screen. Visible: ${screenSummary(nodes)}.`,
       assertion: 'text-visible',
     };
   }
 
-  const words = expected
-    .toLowerCase().replace(/[^\w\s-]/g, ' ').split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
-    .slice(0, 6);
-
-  if (words.length === 0) {
+  // 3) Progression claims ("user should move to Onboarding 2"): the provable
+  //    part is that the screen actually advanced.
+  if (PROGRESSION_RE.test(clause) && context.beforeSignature !== undefined) {
+    const changed = context.afterSignature !== context.beforeSignature
+      || context.afterActivity !== context.beforeActivity;
     return {
-      status: 'inconclusive',
-      actual: `The expected result "${expected}" contains no assertable subject, so no automated check could be derived.`,
-      assertion: 'none',
+      status: changed !== negated ? 'pass' : 'fail',
+      detail: changed
+        ? `The screen advanced after the interaction (now showing: ${screenSummary(nodes)}).`
+        : `The screen did not change after the interaction, so no navigation occurred. Still showing: ${screenSummary(nodes)}.`,
+      assertion: 'screen-progressed',
     };
   }
 
-  // Word-boundary matching: plain `includes` lets "home" match "Homepage" and
-  // half-matches used to be enough to pass. Every meaningful word must appear.
+  // 4) Scrollability is a real hierarchy attribute.
+  if (SCROLLABLE_RE.test(clause) && !UNVERIFIABLE_RE.test(clause)) {
+    const scrollable = nodes.some((n) => n.scrollable);
+    return {
+      status: scrollable !== negated ? 'pass' : 'fail',
+      detail: scrollable
+        ? 'The screen contains a scrollable container.'
+        : 'No scrollable container was present in the view hierarchy.',
+      assertion: 'scrollable',
+    };
+  }
+
+  // 5) "Close button should be clickable" — an enabled, tappable control.
+  if (CLICKABLE_CLAIM_RE.test(clause)) {
+    const target = contentWords(clause).find((w) => new RegExp(`\\b${w}\\b`, 'i').test(screenText));
+    const hit = target ? findNode(nodes, target, { clickable: true }) : null;
+    const anyClickable = nodes.some((n) => n.clickable && n.enabled);
+    const ok = hit ? hit.enabled : anyClickable;
+    return {
+      status: ok !== negated ? 'pass' : 'fail',
+      detail: ok
+        ? `An enabled, tappable control is present${hit ? ` ("${(hit.text || hit.contentDesc).trim()}")` : ''}.`
+        : 'No enabled, tappable control was found on screen.',
+      assertion: 'clickable',
+    };
+  }
+
+  // 6) Layout claims ("Title, description and Next button should display"):
+  //    assert the structure the sheet is describing actually exists — heading
+  //    text, body text, and a way forward — instead of hunting for the literal
+  //    words "title" and "button", which are never rendered.
+  if (/\b(?:title|description|button)\b/i.test(clause) && contentWords(clause).length === 0) {
+    const labels = nodes.map((n) => (n.text || n.contentDesc).trim()).filter((s) => s.length > 0);
+    const forward = findForwardAffordance(nodes, ['advance', 'dismiss', 'grant']);
+    const ok = labels.length >= 2 && !!forward;
+    return {
+      status: ok !== negated ? 'pass' : 'fail',
+      detail: ok
+        ? `The screen shows ${labels.length} text element(s) and a forward control ("${(forward!.node.text || forward!.node.contentDesc).trim() || forward!.intent}").`
+        : `The described layout is incomplete — found ${labels.length} text element(s)${forward ? '' : ' and no forward control'}. Visible: ${screenSummary(nodes)}.`,
+      assertion: 'layout-structure',
+    };
+  }
+
+  // 7) Qualities a view hierarchy cannot expose. Reported honestly: neither a
+  //    PASS (which would be fabricated) nor an Issue (which would be false).
+  if (UNVERIFIABLE_RE.test(clause)) {
+    return {
+      status: 'inconclusive',
+      detail: `"${clause.trim()}" describes playback/timing/visual quality, which cannot be verified from the device's view hierarchy — it needs manual confirmation.`,
+      assertion: 'not-machine-verifiable',
+    };
+  }
+
+  // 8) Fall back to on-screen subject matching. Proportional, not all-or-
+  //    nothing: sheets pad expectations with prose, so demanding every word
+  //    made real matches fail.
+  const words = contentWords(clause).slice(0, 6);
+  if (words.length === 0) {
+    return {
+      status: 'inconclusive',
+      detail: `"${clause.trim()}" contains no assertable on-screen subject, so no automated check could be derived.`,
+      assertion: 'none',
+    };
+  }
   const hits = words.filter((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(screenText));
-  const ok = hits.length === words.length;
+  const ok = hits.length > 0 && hits.length * 2 >= words.length;
   return {
     status: ok !== negated ? 'pass' : 'fail',
-    actual: ok
-      ? `Device screen matches the expectation (all terms found: ${hits.join(', ')}).`
-      : `Device screen does not match — required [${words.join(', ')}], found only [${hits.join(', ') || 'none'}]. Visible: ${screenSummary(nodes)}.`,
-    assertion: 'text-keywords',
+    detail: ok
+      ? `The screen shows the expected subject(s): ${hits.join(', ')}.`
+      : `The screen does not show the expected subject(s) — looked for [${words.join(', ')}], found [${hits.join(', ') || 'none'}]. Visible: ${screenSummary(nodes)}.`,
+    assertion: 'text-subjects',
   };
 }
 

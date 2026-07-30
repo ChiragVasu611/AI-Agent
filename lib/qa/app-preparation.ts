@@ -9,7 +9,7 @@
 import { existsSync } from 'fs';
 import {
   installApp, isPackageInstalled, launchApp, captureDeviceScreen, clearLogcat,
-  packageFromPlayUrl, appIdFromAppStoreUrl, installFromPlayStore, hasInternet, clearAppData,
+  packageFromPlayUrl, appIdFromAppStoreUrl, installFromPlayStore, hasInternet, clearAppData, keepDeviceAwake,
 } from '@/lib/qa/android-bridge';
 
 export interface PreparationStep {
@@ -146,6 +146,12 @@ export async function prepareFromAppStore(url: string): Promise<PreparationResul
 async function finishLaunch(serial: string, pkg: string, steps: PreparationStep[]): Promise<PreparationResult> {
   // Start from a clean log so crash detection only sees this run.
   await clearLogcat(serial).catch(() => {});
+
+  // A full sheet takes many minutes. If the display sleeps partway through, the
+  // app leaves the foreground (and USB adb can drop with it), stranding every
+  // remaining test case for a reason that has nothing to do with the app.
+  const awake = await keepDeviceAwake(serial);
+  steps.push(step('Keep device awake for the run', awake.ok, awake.detail));
 
   // Reset to a genuine first-run state. Sheets describe one journey beginning
   // at fresh install; leftover state from a previous run would silently start

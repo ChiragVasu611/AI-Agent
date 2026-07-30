@@ -13,7 +13,8 @@
 
 export type StepActionKind =
   | 'navigate' | 'click' | 'type' | 'select' | 'check' | 'uncheck' | 'clear'
-  | 'hover' | 'press' | 'scroll' | 'wait' | 'submit' | 'verify' | 'proceed' | 'unknown';
+  | 'hover' | 'press' | 'scroll' | 'wait' | 'submit' | 'verify' | 'proceed'
+  | 'volume' | 'unknown';
 
 export interface StepAction {
   kind: StepActionKind;
@@ -69,7 +70,13 @@ const CLICK_RE = /^(?:click|tap|press|select|choose|hit|activate)\b/i;
 const TYPE_RE = /^(?:enter|type|input|fill|provide|key\s*in|write|set)\b/i;
 const CLEAR_RE = /^(?:clear|erase|empty|remove\s+text)\b/i;
 const HOVER_RE = /^(?:hover|mouse\s*over)\b/i;
-const SCROLL_RE = /^(?:scroll|swipe)\b/i;
+/**
+ * "Slide", "drag" and "flick" are the same gesture a sheet means by "swipe" —
+ * left out, steps like "Slide review manually" were unmappable and blocked.
+ */
+const SCROLL_RE = /^(?:scroll|swipe|slide|drag|flick)\b/i;
+/** "Increase volume", "turn the volume down" — a real hardware key press. */
+const VOLUME_RE = /^(?:increase|decrease|raise|lower|turn)\b[^.]*\bvolume\b|^volume\b/i;
 const WAIT_RE = /^(?:wait|pause|sleep)\b/i;
 const SUBMIT_RE = /^(?:submit|send)\b/i;
 const CHECK_RE = /^(?:check|tick|enable)\b/i;
@@ -112,6 +119,62 @@ function parseTypeStep(rest: string, raw: string, testData: string): StepAction 
   return { kind: 'type', target, value, raw };
 }
 
+/**
+ * Direction of a scroll/slide gesture. "bottom to top" describes the content's
+ * travel, so it is an upward swipe; a bare "top"/"up" means the same thing.
+ */
+function scrollDirection(raw: string): 'up' | 'down' | 'left' | 'right' {
+  if (/\bright\b/i.test(raw)) return 'right';
+  if (/\bleft\b/i.test(raw)) return 'left';
+  if (/\bbottom\s+to\s+top\b|\bup\b|\btop\b/i.test(raw)) return 'up';
+  return 'down';
+}
+
+/**
+ * Split a compound instruction ("Increase volume and slide review manually")
+ * into the actions it actually asks for, so both halves genuinely execute
+ * instead of the whole step being reported as unmappable.
+ *
+ * Deliberately only attempted when the step as a whole cannot be interpreted:
+ * a step like `Tap "Save and Continue"` must never be torn in half, and leaving
+ * already-mappable steps untouched guarantees that cannot happen.
+ */
+export function interpretStepParts(rawStep: string, testData = ''): StepAction[] {
+  const whole = interpretStep(rawStep, testData);
+  const raw = String(rawStep ?? '').trim();
+
+  // A quoted literal may itself contain "and" — `Tap "Save and Continue"` is one
+  // control, not two steps — so quoted steps are never split.
+  if (/["'“”‘’]/.test(raw)) return [whole];
+  // An assertion reads as a single expectation however many clauses it lists.
+  if (whole.kind === 'verify') return [whole];
+
+  const clauses = raw
+    .split(/\s*(?:,\s*then\b|;|\band\s+also\b|\band\s+then\b|\band\b|\bthen\b)\s*/i)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 2);
+  if (clauses.length < 2) return [whole];
+
+  const parts = clauses.map((c) => interpretStep(c, testData));
+  // Every clause must independently read as an instruction — its own leading
+  // action verb, and a mapping the executor can carry out. That is what stops an
+  // unquoted control label ("Click Save and Exit") being torn in half: "Exit"
+  // alone is not verb-led, so that step stays whole.
+  const allVerbLed = clauses.every(startsWithActionVerb);
+  const allMappable = parts.every((p) => p.kind !== 'unknown');
+  return allVerbLed && allMappable ? parts : [whole];
+}
+
+/** Every leading verb the interpreter recognises, for compound-split safety. */
+const ACTION_VERB_RES = [
+  VERIFY_RE, NAVIGATE_RE, INSTALL_THEN_LAUNCH_RE, CLICK_RE, TYPE_RE, CLEAR_RE,
+  HOVER_RE, SCROLL_RE, WAIT_RE, SUBMIT_RE, CHECK_RE, UNCHECK_RE, PROCEED_RE, VOLUME_RE,
+];
+
+function startsWithActionVerb(clause: string): boolean {
+  return ACTION_VERB_RES.some((re) => re.test(clause.trim()));
+}
+
 export function interpretStep(rawStep: string, testData = ''): StepAction {
   const raw = String(rawStep ?? '').trim();
   if (!raw) return { kind: 'unknown', target: '', value: '', raw };
@@ -132,6 +195,13 @@ export function interpretStep(rawStep: string, testData = ''): StepAction {
   if (INSTALL_THEN_LAUNCH_RE.test(raw)) {
     return { kind: 'navigate', target: '', value: '', raw };
   }
+  // "Tap the back button" / "press device back" means the hardware Back key.
+  // Searching the hierarchy for a control labelled "back" finds nothing on most
+  // screens, which failed the step for the wrong reason.
+  if (/\b(?:back)\b/i.test(raw) && (CLICK_RE.test(raw) || /^(?:go|navigate)\b/i.test(raw))
+      && !/\bback\s+to\s+(?!the\s+(?:previous|last)\b)/i.test(raw)) {
+    return { kind: 'press', target: '', value: 'Escape', raw };
+  }
   if (NAVIGATE_RE.test(raw)) {
     const url = raw.match(/https?:\/\/\S+/)?.[0] ?? raw.match(/\s(\/[\w\-/]*)/)?.[1] ?? '';
     return { kind: 'navigate', target: cleanTarget(strip(NAVIGATE_RE)), value: url, raw };
@@ -139,8 +209,11 @@ export function interpretStep(rawStep: string, testData = ''): StepAction {
   if (WAIT_RE.test(raw)) {
     return { kind: 'wait', target: '', value: raw.match(/(\d+)/)?.[1] ?? '1', raw };
   }
+  if (VOLUME_RE.test(raw)) {
+    return { kind: 'volume', target: '', value: /\b(?:decrease|lower|down|mute|reduce)\b/i.test(raw) ? 'down' : 'up', raw };
+  }
   if (SCROLL_RE.test(raw)) {
-    return { kind: 'scroll', target: cleanTarget(strip(SCROLL_RE)), value: /up|top/i.test(raw) ? 'up' : 'down', raw };
+    return { kind: 'scroll', target: cleanTarget(strip(SCROLL_RE)), value: scrollDirection(raw), raw };
   }
   if (HOVER_RE.test(raw)) {
     return { kind: 'hover', target: cleanTarget(strip(HOVER_RE)), value: '', raw };

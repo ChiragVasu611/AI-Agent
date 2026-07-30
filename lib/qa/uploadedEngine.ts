@@ -9,7 +9,8 @@ import { placeholderScreenshot } from '@/lib/qa/screenshot';
 import { interpretStep } from '@/lib/qa/step-interpreter';
 import { validateExpectation, type PageSignals } from '@/lib/qa/expectation-validator';
 import {
-  createExecutionSession, executeStep, captureScreenshot, currentScreenName, type ExecutionSession,
+  createExecutionSession, executeStep, captureScreenshot, currentScreenName, dismissBlockingOverlay,
+  NAV_TIMEOUT_MS, type ExecutionSession,
 } from '@/lib/qa/web-step-executor';
 import { log } from '@/lib/qa/runtime-helpers';
 import { scanDevices } from '@/lib/qa/device-detect';
@@ -465,6 +466,8 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
     slowestLoadMs = Math.max(slowestLoadMs, Date.now() - navStart);
     await log(runId, 'automation', 'info', `Loaded ${sourceRef} in ${Date.now() - navStart}ms.`);
 
+    const targetOrigin = new URL(sourceRef).origin;
+
     for (let i = 0; i < cases.length; i++) {
       const tc = cases[i];
       const caseStart = Date.now();
@@ -472,9 +475,44 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
       run.currentSuite = tc.module;
       run.currentFeature = tc.feature;
       run.currentCase = `${tc.testCaseId}: ${tc.scenario}`;
+      run.currentExpected = tc.expectedResult ?? '';
+      run.currentActual = '';
+      run.currentStepStatus = 'running';
       run.progress = Math.round((i / Math.max(total, 1)) * 100);
       await run.save();
       await log(runId, 'automation', 'info', `[${tc.testCaseId}] ${tc.scenario} — executing ${tc.steps.length} step(s).`);
+
+      // Re-anchor on the app's own origin before every case. One step that
+      // clicks an ad or a third-party OAuth link can navigate the shared page
+      // away entirely — without this, every remaining case would keep
+      // "executing" against the wrong site and just look like it silently
+      // stopped progressing, the same failure mode fixed on the Android engine.
+      let currentOrigin: string | null = null;
+      try { currentOrigin = new URL(session.page.url()).origin; } catch { /* about:blank etc. */ }
+      if (currentOrigin && currentOrigin !== targetOrigin) {
+        const recovered = await session.page
+          .goto(sourceRef, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS })
+          .then(() => true)
+          .catch(() => false);
+        if (!recovered) {
+          const shot = await captureScreenshot(session.page);
+          tc.result = 'blocked';
+          tc.actualResult = `Blocked: the page had navigated to "${currentOrigin}" (expected "${targetOrigin}") and could not be returned to the app under test. The steps were not executed, because they would have run against a different site.`;
+          tc.failedStepIndex = null;
+          tc.screenName = await currentScreenName(session.page);
+          tc.stepResults = [];
+          await tc.save();
+          blocked += 1;
+          run.blockedCases = blocked;
+          await run.save();
+          if (shot) {
+            await QaScreenshot.create({ runId, screenName: 'Navigated away from app', testStep: tc.scenario, imageDataUrl: shot });
+          }
+          await log(runId, 'automation', 'error', `[${tc.testCaseId}] BLOCKED — the page left ${targetOrigin} and could not be recovered.`);
+          continue;
+        }
+        await log(runId, 'automation', 'warn', `[${tc.testCaseId}] The page had drifted to "${currentOrigin}"; navigated back to ${sourceRef}.`);
+      }
 
       const stepRecords: StepRecord[] = [];
       let firstFailedStepIndex: number | null = null;
@@ -499,9 +537,28 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
           continue;
         }
 
+        // Proactively clear a cookie-consent banner or modal before even
+        // attempting the step — these are never what the sheet's step is
+        // about, so they must never be allowed to fail it.
+        const preDismiss = await dismissBlockingOverlay(session.page).catch(() => ({ handled: [] as string[] }));
+        if (preDismiss.handled.length > 0) {
+          await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1}: ${preDismiss.handled.join('; ')} before executing.`);
+        }
+
         session.resetSignals();
         const stepStart = Date.now();
-        const exec = await executeStep(session.page, action, sourceRef);
+        let exec = await executeStep(session.page, action, sourceRef);
+
+        // The step's own failure can itself be an overlay the previous step
+        // surfaced. Clear it and retry exactly once before accepting the step
+        // as genuinely failed.
+        if (!exec.ok) {
+          const postDismiss = await dismissBlockingOverlay(session.page).catch(() => ({ handled: [] as string[] }));
+          if (postDismiss.handled.length > 0) {
+            await log(runId, 'automation', 'warn', `[${tc.testCaseId}] Step ${si + 1} initially failed; ${postDismiss.handled.join('; ')} and retrying.`);
+            exec = await executeStep(session.page, action, sourceRef);
+          }
+        }
         const durationMs = Date.now() - stepStart;
         if (action.kind === 'navigate') slowestLoadMs = Math.max(slowestLoadMs, durationMs);
 
@@ -511,7 +568,12 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
 
         // A 'verify' step carries its own inline assertion — check it for real.
         if (exec.ok && action.kind === 'verify') {
-          const v = await validateExpectation(session.page, action.raw, session.signals);
+          // Assert what the sheet actually expects. Passing the step's own
+          // prose here demanded its instruction verbs ("verify") literally
+          // appear on the page. The verify step's own named subject is used
+          // when it has one, otherwise the case's Expected Result column.
+          const subject = action.target?.trim() ? action.target : tc.expectedResult;
+          const v = await validateExpectation(session.page, subject, session.signals);
           status = v.status === 'pass' ? 'pass' : v.status === 'fail' ? 'fail' : 'blocked';
           actual = v.actual;
           assertion = v.assertion;
@@ -533,7 +595,11 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
           imageDataUrl: shot ?? placeholderScreenshot(screen, tc.module, runId, project.name),
         });
 
+        // Live preview: current screen, what this step actually did, and its
+        // verdict — visible while the run is still in flight.
         run.currentScreen = screen;
+        run.currentActual = actual;
+        run.currentStepStatus = status;
         await run.save();
 
         if (status === 'fail' || status === 'blocked') {
@@ -556,6 +622,9 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
         finalResult = failedRec.status === 'blocked' ? 'blocked' : 'fail';
         finalActual = `Step ${firstFailedStepIndex + 1} ("${failedRec.instruction}") ${failedRec.status === 'blocked' ? 'could not be executed' : 'failed'}: ${firstFailureDetail}`;
       } else {
+        // Same reasoning as per-step: a cookie banner or modal must never be
+        // mistaken for the app's genuine expected-result state.
+        await dismissBlockingOverlay(session.page).catch(() => null);
         const v = await validateExpectation(session.page, tc.expectedResult, session.signals);
         finalResult = v.status === 'pass' ? 'pass' : v.status === 'fail' ? 'fail' : 'blocked';
         finalActual = v.actual;

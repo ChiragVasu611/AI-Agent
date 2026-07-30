@@ -11,7 +11,7 @@ import type { StepAction } from '@/lib/qa/step-interpreter';
 import type { PageSignals } from '@/lib/qa/expectation-validator';
 
 const ACTION_TIMEOUT_MS = 8000;
-const NAV_TIMEOUT_MS = 25000;
+export const NAV_TIMEOUT_MS = 25000;
 const VIEWPORT = { width: 1366, height: 900 };
 
 export interface ExecutionSession {
@@ -245,6 +245,58 @@ export async function executeStep(
   } catch (e) {
     return { ok: false, detail: `The action threw during execution: ${(e as Error).message.split('\n')[0]}` };
   }
+}
+
+/**
+ * Unambiguous cookie-consent / dismiss vocabulary only — deliberately narrow,
+ * the same discipline as the Android engine's overlay dismissal. A sheet step
+ * is free to target "Continue", "Next", "OK", "Allow" itself, so those generic
+ * labels must NEVER be auto-clicked here or this would race the sheet's own
+ * intended interaction. English-language consent-banner convention, not any
+ * one site's wording — works on a page the engine has never seen.
+ */
+const OVERLAY_DISMISS_RE = /\b(?:accept all cookies|accept all|accept cookies|allow all cookies|allow all|i agree|agree and continue|i accept|got it|no,? ?thanks|no thank you|reject all|reject non-essential|only necessary|necessary only)\b/i;
+
+/**
+ * Best-effort dismissal of a cookie-consent banner or modal overlay sitting on
+ * top of the page under test — exactly the kind of thing a sheet's step never
+ * mentions but that would otherwise fail every locator lookup for the rest of
+ * the run. Only unambiguous consent vocabulary and a dialog's own labelled
+ * close control are touched, never a generic flow button a step might target.
+ */
+export async function dismissBlockingOverlay(page: Page, maxRounds = 2): Promise<{ handled: string[] }> {
+  const handled: string[] = [];
+
+  for (let round = 0; round < maxRounds; round++) {
+    let target: { locator: import('playwright').Locator; label: string } | null = null;
+
+    for (const role of ['button', 'link'] as const) {
+      const byRole = page.getByRole(role, { name: OVERLAY_DISMISS_RE }).first();
+      if (await byRole.isVisible({ timeout: 700 }).catch(() => false)) {
+        target = { locator: byRole, label: (await byRole.innerText().catch(() => '')).trim() || `${role} (consent)` };
+        break;
+      }
+    }
+
+    // A dialog's own labelled close icon — scoped to an actual dialog/modal
+    // container so this can never grab an unrelated close button elsewhere.
+    if (!target) {
+      const closeIcon = page.locator(
+        '[role="dialog"] [aria-label*="close" i], [role="alertdialog"] [aria-label*="close" i], '
+        + '[aria-modal="true"] [aria-label*="close" i]',
+      ).first();
+      if (await closeIcon.isVisible({ timeout: 700 }).catch(() => false)) {
+        target = { locator: closeIcon, label: 'dialog close control' };
+      }
+    }
+
+    if (!target) break;
+    await target.locator.click({ timeout: ACTION_TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(400);
+    handled.push(`dismissed overlay ("${target.label}")`);
+  }
+
+  return { handled };
 }
 
 /** Real PNG screenshot of the current viewport, as a data URL. */
