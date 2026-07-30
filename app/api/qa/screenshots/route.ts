@@ -17,6 +17,11 @@ export async function GET(req: Request) {
   const run = await QaTestRun.findOne({ _id: runId, userId: user.id }).lean();
   if (!run) return NextResponse.json({ screenshots: [] }, { status: 404 });
 
+  // Take the 60 most recent frames, then hand them back oldest → newest.
+  // Callers treat the last element as the current frame ("latest screenshot",
+  // live preview) and render the gallery in chronological order; returning
+  // newest-first made the *oldest* of the last 60 frames read as the live one,
+  // so the preview showed a badly stale screen and looked frozen.
   const docs = await QaScreenshot.find({ runId }).sort({ createdAt: -1 }).limit(60).lean();
-  return NextResponse.json({ screenshots: docs.map(serializeDoc) });
+  return NextResponse.json({ screenshots: docs.reverse().map(serializeDoc) });
 }

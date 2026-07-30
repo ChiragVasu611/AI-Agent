@@ -11,12 +11,14 @@
 import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { QaBug } from '@/lib/mongodb/models/QaBug';
 import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
-import { interpretStep } from '@/lib/qa/step-interpreter';
+import { interpretStepParts } from '@/lib/qa/step-interpreter';
 import {
   captureDeviceScreen, detectCrashes, readLogcat, stopApp, ensureAppForeground, dismissBlockingOverlay,
+  advancePastGateScreen, escapeAdSurface,
 } from '@/lib/qa/android-bridge';
 import {
   executeAndroidStep, validateAndroidExpectation, currentAndroidScreen,
+  type ValidationContext,
 } from '@/lib/qa/android-step-executor';
 import type { PreparationResult } from '@/lib/qa/app-preparation';
 import { log } from '@/lib/qa/runtime-helpers';
@@ -24,6 +26,24 @@ import type { QaPriority, QaSeverity } from '@/lib/types';
 
 const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
 const VALID_PRIORITIES = new Set(['p1', 'p2', 'p3', 'p4']);
+
+/**
+ * How many intermediate screens the engine will walk forward through while
+ * looking for the control a step names. Enough to clear a realistic first-run
+ * gauntlet (language → onboarding slides → consent), bounded so a genuinely
+ * missing control still fails instead of clicking through the whole app.
+ */
+const MAX_GATE_HOPS = 6;
+
+/**
+ * Did the step fail purely because the element it names is not on this screen?
+ * Only those failures justify walking forward to look for it — a disabled
+ * control, a stuck loading screen, or a tap that had no effect are real defects
+ * and must be reported, not navigated away from.
+ */
+function isTargetMissing(detail: string): boolean {
+  return /No on-screen element matching|No text field matching|No control was available|No checkbox matching|No dropdown matching|is on screen but is not an interactive control/i.test(detail);
+}
 
 function normalizeSeverity(raw: string): QaSeverity {
   const s = String(raw ?? '').toLowerCase();
@@ -130,6 +150,11 @@ export async function executeAndroidSuite(opts: {
     const tc = cases[i];
     const caseStart = Date.now();
 
+    // A case whose own module/feature/scenario is about ad behaviour must
+    // never have its interstitial auto-dismissed out from under it — the
+    // sheet's own steps are the ones allowed to interact with it.
+    const isAdCase = /\bads?\b|advert(?:isement|ising)?/i.test(`${tc.module} ${tc.feature} ${tc.scenario}`);
+
     run.currentSuite = tc.module;
     run.currentFeature = tc.feature;
     run.currentCase = `${tc.testCaseId}: ${tc.scenario}`;
@@ -145,15 +170,67 @@ export async function executeAndroidSuite(opts: {
     // every remaining case would keep "executing" against the wrong app and
     // the sheet would look like it silently stopped progressing.
     if (pkg) {
-      const anchor = await ensureAppForeground(serial, pkg);
+      const anchor = await ensureAppForeground(serial, pkg, !isAdCase);
       if (anchor.recovered || !anchor.ok) {
         await log(runId, 'automation', anchor.ok ? 'warn' : 'error', `[${tc.testCaseId}] ${anchor.detail}`);
+      }
+      // The app under test could not be put back on screen. Executing the case
+      // anyway would assert the sheet's steps against whatever else is showing
+      // (the launcher, a browser) and file Issues describing that other app —
+      // which is exactly how a run produced 15 bogus failures. Block the case
+      // with the real reason instead of testing the wrong application.
+      if (!anchor.ok) {
+        const shot = anchor.deviceLost ? null : await captureDeviceScreen(serial);
+        tc.result = 'blocked';
+        tc.actualResult = anchor.deviceLost
+          ? `Blocked: ${anchor.detail}`
+          : `Blocked: ${anchor.detail} The steps were not executed, because they would have run against a different application.`;
+        tc.failedStepIndex = null;
+        tc.screenName = anchor.deviceLost ? 'Device disconnected' : await currentAndroidScreen(serial);
+        tc.stepResults = [];
+        await tc.save();
+        blocked += 1;
+        run.blockedCases = blocked;
+        await run.save();
+        if (shot) {
+          await QaScreenshot.create({ runId, screenName: 'App not in foreground', testStep: tc.scenario, imageDataUrl: shot });
+        }
+        await log(runId, 'automation', anchor.deviceLost ? 'error' : 'warn',
+          `[${tc.testCaseId}] BLOCKED — ${anchor.deviceLost ? anchor.detail : 'the app under test could not be restored to the foreground.'}`);
+
+        // A lost device will not come back on its own, so grinding through every
+        // remaining case to block it individually is pointless and slow. Mark the
+        // rest with the same honest reason and end the run.
+        if (anchor.deviceLost) {
+          for (let rest = i + 1; rest < cases.length; rest++) {
+            const other = cases[rest];
+            other.result = 'blocked';
+            other.actualResult = `Blocked: ${anchor.detail}`;
+            other.failedStepIndex = null;
+            other.screenName = 'Device disconnected';
+            other.stepResults = [];
+            await other.save();
+            blocked += 1;
+          }
+          run.blockedCases = blocked;
+          await run.save();
+          await log(runId, 'automation', 'error', `Execution stopped after ${i + 1}/${cases.length} test case(s): the device is no longer reachable. Partial results are saved.`);
+          break;
+        }
+        continue;
       }
     }
 
     const stepRecords: StepRecord[] = [];
     let firstFailedStepIndex: number | null = null;
     let firstFailureDetail = '';
+    // Set only by a real failure, so an unverifiable-but-executed step keeps the
+    // case running through its remaining steps.
+    let haltCase = false;
+    // Screen state around the most recent interaction, so a case-level
+    // expectation like "user should move to the next screen" can be asserted on
+    // whether the screen actually advanced.
+    let lastTransition: ValidationContext = {};
 
     // A case with no steps executes nothing, so it cannot be evidence of
     // anything. Passing it would report success for work never performed.
@@ -182,14 +259,20 @@ export async function executeAndroidSuite(opts: {
       }
 
       const instruction = tc.steps[si];
-      const action = interpretStep(instruction, tc.testData);
+      // A compound instruction ("Increase volume and slide review manually") is
+      // executed as each action it asks for, in written order, rather than being
+      // written off as unmappable. Ordinary steps yield exactly one action.
+      const actionParts = interpretStepParts(instruction, tc.testData);
+      const action = actionParts[0];
 
       run.currentStep = `Step ${si + 1}/${tc.steps.length}: ${instruction}`;
       await run.save();
 
-      // Once a step fails the app is off the expected path; the remaining steps
-      // are recorded as skipped rather than run against a wrong screen.
-      if (firstFailedStepIndex !== null) {
+      // Once a step genuinely FAILS the app is off the expected path; the
+      // remaining steps are recorded as skipped rather than run against a wrong
+      // screen. A step that merely could not be *verified* (playback, audio,
+      // timing) executed fine, so it must not halt the rest of the case.
+      if (haltCase) {
         stepRecords.push({
           stepNumber: si + 1, action: action.kind, instruction, status: 'skipped',
           actual: 'Not executed — a previous step in this test case already failed.',
@@ -206,9 +289,35 @@ export async function executeAndroidSuite(opts: {
       if (preDismiss.handled.length > 0) {
         await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1}: ${preDismiss.handled.join('; ')} before executing.`);
       }
+      // A full-screen ad SDK Activity is a separate case from an in-app
+      // overlay above: it replaces the content entirely and lives inside the
+      // app's own package, so plain package-based checks never catch it. Only
+      // checked when this case is not itself testing ad behaviour.
+      if (!isAdCase) {
+        const adEscape = await escapeAdSurface(serial).catch(() => ({ escaped: true, detail: '' }));
+        if (!adEscape.escaped) {
+          await log(runId, 'automation', 'warn', `[${tc.testCaseId}] Step ${si + 1}: ${adEscape.detail}`);
+        } else if (adEscape.detail && !adEscape.detail.startsWith('No advertisement')) {
+          await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1}: ${adEscape.detail}`);
+        }
+      }
 
       const stepStart = Date.now();
       let exec = await executeAndroidStep(serial, action, pkg);
+
+      // Remaining clauses of a compound instruction. The step's verdict is the
+      // conjunction: it only passes if every part it asked for succeeded.
+      for (const part of actionParts.slice(1)) {
+        if (!exec.ok) break;
+        const partExec = await executeAndroidStep(serial, part, pkg);
+        exec = {
+          ...partExec,
+          detail: `${exec.detail} ${partExec.detail}`,
+          // Keep the transition spanning the whole compound step.
+          beforeSignature: exec.beforeSignature ?? partExec.beforeSignature,
+          beforeActivity: exec.beforeActivity ?? partExec.beforeActivity,
+        };
+      }
 
       // The step's own failure can itself be an overlay the tap surfaced
       // (e.g. an interstitial ad triggered by the previous step). Clear it and
@@ -217,8 +326,40 @@ export async function executeAndroidSuite(opts: {
       // instead of stopping on them.
       if (!exec.ok) {
         const postDismiss = await dismissBlockingOverlay(serial).catch(() => ({ handled: [] as string[] }));
+        let retried = false;
         if (postDismiss.handled.length > 0) {
           await log(runId, 'automation', 'warn', `[${tc.testCaseId}] Step ${si + 1} initially failed; ${postDismiss.handled.join('; ')} and retrying.`);
+          exec = await executeAndroidStep(serial, action, pkg);
+          retried = true;
+        }
+        // The step's own failure can itself be an interstitial the previous
+        // step's tap surfaced. Clear it and retry once, same discipline as
+        // the overlay case above.
+        if (!exec.ok && !retried && !isAdCase) {
+          const adEscape = await escapeAdSurface(serial).catch(() => ({ escaped: true, detail: '' }));
+          if (adEscape.detail && !adEscape.detail.startsWith('No advertisement')) {
+            await log(runId, 'automation', 'warn', `[${tc.testCaseId}] Step ${si + 1} initially failed; ${adEscape.detail} Retrying.`);
+            exec = await executeAndroidStep(serial, action, pkg);
+          }
+        }
+      }
+
+      // Still failing because the control the step names simply is not on this
+      // screen: the app is most likely sitting on an intermediate gate the sheet
+      // never mentions (language picker, onboarding slide, consent notice).
+      // Walk forward through those gates and retry, so a first-run flow cannot
+      // strand the rest of the sheet. Bounded, and only ever entered after the
+      // step's own target was genuinely absent.
+      if (!exec.ok && isTargetMissing(exec.detail)) {
+        for (let hop = 0; hop < MAX_GATE_HOPS && !exec.ok; hop++) {
+          const hopResult = await advancePastGateScreen(serial, pkg).catch(
+            (e) => ({ advanced: false, detail: (e as Error).message }),
+          );
+          if (!hopResult.advanced) {
+            await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1}: ${hopResult.detail}`);
+            break;
+          }
+          await log(runId, 'automation', 'info', `[${tc.testCaseId}] Step ${si + 1}: ${hopResult.detail} Retrying the step.`);
           exec = await executeAndroidStep(serial, action, pkg);
         }
       }
@@ -227,9 +368,22 @@ export async function executeAndroidSuite(opts: {
       let status: StepRecord['status'] = exec.ok ? 'pass' : 'fail';
       let actual = exec.detail;
       let assertion: string = action.kind;
+      const transition: ValidationContext = {
+        beforeSignature: exec.beforeSignature,
+        beforeActivity: exec.beforeActivity,
+        afterSignature: exec.afterSignature,
+        afterActivity: exec.afterActivity,
+      };
+      if (transition.beforeSignature !== undefined) lastTransition = transition;
 
       if (exec.ok && action.kind === 'verify') {
-        const v = await validateAndroidExpectation(serial, action.raw, pkg);
+        // Assert what the sheet actually expects. Passing the step's own prose
+        // here made the check demand its instruction verbs ("verify", "check")
+        // be visible on screen, which no app ever renders. The verify step's
+        // own object is used when it names one, otherwise the case's Expected
+        // Result column — which is where the real expectation lives.
+        const subject = action.target?.trim() ? action.target : tc.expectedResult;
+        const v = await validateAndroidExpectation(serial, subject, pkg, transition);
         status = v.status === 'pass' ? 'pass' : v.status === 'fail' ? 'fail' : 'blocked';
         actual = v.actual;
         assertion = v.assertion;
@@ -237,9 +391,13 @@ export async function executeAndroidSuite(opts: {
         status = 'blocked';
       }
 
-      // Real capture of the device screen after the interaction.
-      const shot = await captureDeviceScreen(serial);
-      const screen = await currentAndroidScreen(serial);
+      // Real capture of the device screen after the interaction. The screenshot
+      // and the screen name are independent reads, so they run concurrently
+      // rather than one after the other — this happens on every step.
+      const [shot, screen] = await Promise.all([
+        captureDeviceScreen(serial),
+        currentAndroidScreen(serial),
+      ]);
 
       stepRecords.push({
         stepNumber: si + 1, action: action.kind, instruction, status, actual, assertion,
@@ -260,8 +418,14 @@ export async function executeAndroidSuite(opts: {
       await run.save();
 
       if (status === 'fail' || status === 'blocked') {
-        firstFailedStepIndex = si;
-        firstFailureDetail = actual;
+        if (firstFailedStepIndex === null) {
+          firstFailedStepIndex = si;
+          firstFailureDetail = actual;
+        }
+        // Only a real failure takes the app off the expected path. An
+        // inconclusive assertion means the step ran and we simply cannot judge
+        // it, so the case continues with its remaining steps.
+        if (status === 'fail') haltCase = true;
         await log(runId, 'error', status === 'fail' ? 'error' : 'warn', `[${tc.testCaseId}] Step ${si + 1} ${status.toUpperCase()}: ${actual}`);
       } else {
         await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1} PASS: ${actual}`);
@@ -272,20 +436,24 @@ export async function executeAndroidSuite(opts: {
     let finalResult: 'pass' | 'fail' | 'blocked';
     let finalActual: string;
 
-    if (firstFailedStepIndex !== null) {
-      const rec = stepRecords[firstFailedStepIndex];
-      finalResult = rec.status === 'blocked' ? 'blocked' : 'fail';
-      finalActual = `Step ${firstFailedStepIndex + 1} ("${rec.instruction}") ${rec.status === 'blocked' ? 'could not be executed' : 'failed'}: ${firstFailureDetail}`;
+    const failedStep = stepRecords.find((s) => s.status === 'fail');
+    if (failedStep) {
+      // A genuine step failure is the verdict — the expected result was not met.
+      const idx = failedStep.stepNumber - 1;
+      firstFailedStepIndex = idx;
+      finalResult = 'fail';
+      finalActual = `Step ${failedStep.stepNumber} ("${failedStep.instruction}") failed: ${failedStep.actual}`;
     } else {
       // Same reasoning as per-step: an ad/promo overlay must never be mistaken
       // for the app's genuine expected-result screen.
       await dismissBlockingOverlay(serial).catch(() => null);
-      const v = await validateAndroidExpectation(serial, tc.expectedResult, pkg);
+      if (!isAdCase) await escapeAdSurface(serial).catch(() => null);
+      const v = await validateAndroidExpectation(serial, tc.expectedResult, pkg, lastTransition);
       finalResult = v.status === 'pass' ? 'pass' : v.status === 'fail' ? 'fail' : 'blocked';
       finalActual = v.actual;
-      if (v.status !== 'pass' && stepRecords.length > 0) {
+      if (v.status === 'fail' && stepRecords.length > 0) {
         firstFailedStepIndex = stepRecords.length - 1;
-        stepRecords[stepRecords.length - 1].status = v.status === 'fail' ? 'fail' : 'blocked';
+        stepRecords[stepRecords.length - 1].status = 'fail';
         stepRecords[stepRecords.length - 1].actual = v.actual;
         stepRecords[stepRecords.length - 1].assertion = v.assertion;
       }
@@ -293,14 +461,17 @@ export async function executeAndroidSuite(opts: {
 
     // Final safety net: a case is only PASS when every one of its steps was
     // actually executed and passed. Guards against any path above concluding
-    // success while a step was left skipped, blocked, or unrun.
+    // success while a step was left skipped, blocked, or unrun. A step that ran
+    // but could not be judged makes the case BLOCKED (needs manual review) —
+    // never PASS, since nothing was proven, and never FAIL, since nothing was
+    // shown to be broken.
     if (finalResult === 'pass') {
-      const executed = stepRecords.filter((s) => s.status === 'pass').length;
-      if (executed !== tc.steps.length) {
-        const unfinished = stepRecords.find((s) => s.status !== 'pass');
-        finalResult = 'fail';
-        finalActual = `Only ${executed} of ${tc.steps.length} step(s) completed successfully${unfinished ? ` — step ${unfinished.stepNumber} ("${unfinished.instruction}") was ${unfinished.status}: ${unfinished.actual}` : ''}. The expected result cannot be considered met.`;
-        if (firstFailedStepIndex === null && unfinished) firstFailedStepIndex = unfinished.stepNumber - 1;
+      const unfinished = stepRecords.find((s) => s.status !== 'pass');
+      if (unfinished) {
+        const executed = stepRecords.filter((s) => s.status === 'pass').length;
+        finalResult = 'blocked';
+        finalActual = `${executed} of ${tc.steps.length} step(s) were verified; step ${unfinished.stepNumber} ("${unfinished.instruction}") could not be verified automatically: ${unfinished.actual} The expected result therefore needs manual confirmation.`;
+        if (firstFailedStepIndex === null) firstFailedStepIndex = unfinished.stepNumber - 1;
       }
     }
 

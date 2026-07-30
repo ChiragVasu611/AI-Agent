@@ -269,6 +269,9 @@ export default function TestCaseExecutionPage() {
   const [screenshots, setScreenshots] = useState<any[]>([]);
   const [bugs, setBugs] = useState<any[]>([]);
   const [testCases, setTestCases] = useState<any[]>([]);
+  /** Freshly captured device frame while a run is live; falls back to the last
+   *  stored step screenshot once the run finishes. */
+  const [liveFrame, setLiveFrame] = useState<string | null>(null);
 
   // Test case table controls
   const [tcSearch, setTcSearch] = useState('');
@@ -278,21 +281,21 @@ export default function TestCaseExecutionPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bottomTab, setBottomTab] = useState('summary');
 
+  // Run status, logs, bugs and test case results are all small JSON — safe to
+  // poll quickly so the step-by-step view keeps up with the device.
   useEffect(() => {
     if (!runId) return;
     let cancelled = false;
     async function load() {
-      const [runRes, logsRes, shotsRes, bugsRes, tcRes] = await Promise.all([
+      const [runRes, logsRes, bugsRes, tcRes] = await Promise.all([
         fetch(`/api/qa/runs/${runId}`).then((r) => r.json()),
         fetch(`/api/qa/logs?runId=${runId}`).then((r) => r.json()),
-        fetch(`/api/qa/screenshots?runId=${runId}`).then((r) => r.json()),
         fetch(`/api/qa/bugs?runId=${runId}`).then((r) => r.json()),
         fetch(`/api/qa/test-cases?runId=${runId}`).then((r) => r.json()),
       ]);
       if (cancelled) return;
       setRun(runRes.run);
       setLogs(logsRes.logs ?? []);
-      setScreenshots(shotsRes.screenshots ?? []);
       setBugs(bugsRes.bugs ?? []);
       setTestCases(tcRes.testCases ?? []);
     }
@@ -300,6 +303,47 @@ export default function TestCaseExecutionPage() {
     const interval = setInterval(load, 1500);
     return () => { cancelled = true; clearInterval(interval); };
   }, [runId]);
+
+  // The screenshot history is base64 image data — up to 60 frames, several MB a
+  // time. Re-fetching that on the fast loop was enough to stall the tab and made
+  // the live panel stutter, so it gets its own slower cadence. The live preview
+  // no longer depends on it (see the live-frame poll below), so nothing on
+  // screen lags because of this.
+  useEffect(() => {
+    if (!runId) return;
+    let cancelled = false;
+    async function loadShots() {
+      const res = await fetch(`/api/qa/screenshots?runId=${runId}`).then((r) => r.json()).catch(() => null);
+      if (cancelled || !res) return;
+      setScreenshots(res.screenshots ?? []);
+    }
+    loadShots();
+    const interval = setInterval(loadShots, 6000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [runId]);
+
+  // Real-time device streaming: one freshly captured frame per tick, so the
+  // panel follows the device continuously instead of only updating when a step
+  // completes. Server-side throttling keeps this from competing with the
+  // engine's own device calls, and each response carries a single image.
+  useEffect(() => {
+    if (!runId || run?.status !== 'running') {
+      setLiveFrame(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function pump() {
+      const res = await fetch(`/api/qa/runs/${runId}/live-frame`).then((r) => r.json()).catch(() => null);
+      if (cancelled) return;
+      if (res?.frame) setLiveFrame(res.frame);
+      // Chained rather than a fixed interval, so a slow capture cannot pile up
+      // overlapping requests and make the stream lag further behind.
+      timer = setTimeout(pump, 1000);
+    }
+    pump();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [runId, run?.status]);
 
   function selectPlatform(value: Platform) {
     setPlatform(value);
@@ -602,7 +646,17 @@ export default function TestCaseExecutionPage() {
                     onDrop={(e) => {
                       e.preventDefault();
                       setIsDraggingAppFile(false);
-                      acceptAppFile(e.dataTransfer.files?.[0] ?? null);
+                      const file = e.dataTransfer.files?.[0] ?? null;
+                      // Drag-and-drop never touches the real <input>, only the
+                      // DataTransfer payload — assign it to the input's own
+                      // FileList so FormData(form) actually includes the file.
+                      const input = document.getElementById('appFile') as HTMLInputElement | null;
+                      if (input && file) {
+                        const dt = new DataTransfer();
+                        dt.items.add(file);
+                        input.files = dt.files;
+                      }
+                      acceptAppFile(file);
                     }}
                     className={cn(
                       'flex cursor-pointer items-center gap-2 rounded-lg border border-dashed px-4 py-8 text-xs transition',
@@ -622,7 +676,6 @@ export default function TestCaseExecutionPage() {
                       name="appFile"
                       type="file"
                       accept={platform === 'android' ? ANDROID_ACCEPT : IOS_ACCEPT}
-                      required={isBinarySource}
                       className="hidden"
                       onChange={(e) => acceptAppFile(e.target.files?.[0] ?? null)}
                     />
@@ -878,20 +931,67 @@ export default function TestCaseExecutionPage() {
           <Card className="border-border bg-card/60 p-4 backdrop-blur">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="font-display text-xs font-semibold">Live Tracking</h2>
-              {run && <Badge variant="secondary" className="text-[10px]">{run.engineMode === 'real_browser' ? 'Real' : 'Simulated'}</Badge>}
+              <div className="flex items-center gap-1.5">
+                {isRunning && liveFrame && (
+                  <span className="flex items-center gap-1 text-[10px] font-medium text-emerald-500">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" /> Streaming
+                  </span>
+                )}
+                {run && <Badge variant="secondary" className="text-[10px]">{run.engineMode === 'real_browser' ? 'Real' : 'Simulated'}</Badge>}
+              </div>
             </div>
             {!run ? (
               <Skeleton className="mx-auto aspect-[9/16] max-h-[420px] w-full rounded-xl" />
             ) : (
-              <div className="mx-auto grid aspect-[9/16] max-h-[420px] place-items-center overflow-hidden rounded-xl border border-border bg-secondary/20">
-                {screenshots.length > 0 ? (
-                  <img src={screenshots[screenshots.length - 1].imageDataUrl} alt="Current screen" className="h-full w-full object-cover object-top" />
-                ) : run.engineMode === 'real_browser' ? (
-                  <Globe className="h-8 w-8 text-muted-foreground" />
-                ) : (
-                  <Smartphone className="h-8 w-8 text-muted-foreground" />
-                )}
-              </div>
+              <>
+                {/* object-contain, so the whole device screen stays visible at
+                    its real aspect ratio instead of being cropped to fill. */}
+                <div className="mx-auto grid aspect-[9/16] max-h-[420px] place-items-center overflow-hidden rounded-xl border border-border bg-secondary/20">
+                  {liveFrame || screenshots.length > 0 ? (
+                    <img
+                      src={liveFrame ?? screenshots[screenshots.length - 1].imageDataUrl}
+                      alt="Current device screen"
+                      className="h-full w-full object-contain"
+                    />
+                  ) : run.engineMode === 'real_browser' ? (
+                    <Globe className="h-8 w-8 text-muted-foreground" />
+                  ) : (
+                    <Smartphone className="h-8 w-8 text-muted-foreground" />
+                  )}
+                </div>
+                {/* The "Live Test Execution" card in the main column already
+                    breaks out Module/TC/Step/Expected/Actual in full — this is
+                    just enough context to read the frame on its own, plus the
+                    in-flight step's own verdict (that card only has the last
+                    *completed* case's, one step behind during a run). */}
+                <div className="mt-2 space-y-1.5 text-[11px]">
+                  {(run.currentSuite || run.currentCase) && (
+                    <div className="truncate font-medium text-foreground">
+                      {run.currentSuite}{run.currentSuite && run.currentCase ? ' · ' : ''}{run.currentCase}
+                    </div>
+                  )}
+                  {run.currentStep && (
+                    <div className="line-clamp-2 text-muted-foreground">{run.currentStep}</div>
+                  )}
+                  {run.currentStepStatus === 'running' ? (
+                    <Badge className="gap-1.5 bg-primary/10 text-[10px] font-medium text-primary">
+                      <Loader2 className="h-3 w-3 animate-spin" /> Running
+                    </Badge>
+                  ) : run.currentStepStatus && (
+                    <Badge
+                      className={cn(
+                        'text-[10px] font-semibold uppercase',
+                        run.currentStepStatus === 'pass' && 'bg-emerald-500/15 text-emerald-500',
+                        run.currentStepStatus === 'fail' && 'bg-destructive/15 text-destructive',
+                        run.currentStepStatus === 'blocked' && 'bg-amber-500/15 text-amber-500',
+                        run.currentStepStatus === 'skipped' && 'bg-secondary text-muted-foreground',
+                      )}
+                    >
+                      {run.currentStepStatus}
+                    </Badge>
+                  )}
+                </div>
+              </>
             )}
           </Card>
 

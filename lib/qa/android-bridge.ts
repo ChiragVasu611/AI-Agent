@@ -48,7 +48,16 @@ async function adbBinary(serial: string, args: string[], timeout?: number) {
   return run(bin, ['-s', serial, ...args], timeout, 'buffer');
 }
 
+/**
+ * Commands that change what is on screen. Matched here, at the single choke
+ * point every device command passes through, so a cached view hierarchy can
+ * never outlive the screen it described — including for callers that build an
+ * `input keyevent` batch themselves rather than going through pressKey().
+ */
+const MUTATING_CMD_RE = /^\s*(?:input\b|monkey\b|am\s+(?:start|force-stop|kill)|pm\s+clear|svc\b|settings\s+put)/;
+
 export async function shell(serial: string, command: string, timeout?: number): Promise<string> {
+  if (MUTATING_CMD_RE.test(command)) invalidateUiCache();
   const r = await adb(serial, ['shell', command], timeout);
   return r.stdout.replace(/\r/g, '');
 }
@@ -210,6 +219,38 @@ export async function foregroundPackage(serial: string): Promise<string | null> 
 }
 
 /**
+ * Is the device still attached and responding to adb?
+ *
+ * A USB drop mid-run makes every subsequent device read come back empty, which
+ * is indistinguishable from "the app left the foreground" unless it is checked
+ * explicitly — so a disconnected cable used to be reported as an application
+ * defect. This separates a harness problem from a genuine app problem.
+ */
+export async function deviceOnline(serial: string): Promise<boolean> {
+  const out = await shell(serial, 'echo online', 8000);
+  return /online/.test(out);
+}
+
+/**
+ * Stop the screen sleeping for the duration of a run.
+ *
+ * Long sheets take many minutes, and when the display sleeps the app leaves the
+ * foreground — and on some devices adb over USB drops with it — which strands
+ * every remaining test case. Best-effort: if the settings write is not permitted
+ * the run continues exactly as before.
+ */
+export async function keepDeviceAwake(serial: string): Promise<{ ok: boolean; detail: string }> {
+  try {
+    // 7 = stay on while plugged into AC, USB, or wireless.
+    await shell(serial, 'settings put global stay_on_while_plugged_in 7', 10000);
+    await shell(serial, 'svc power stayon usb', 10000).catch(() => '');
+    return { ok: true, detail: 'Device set to stay awake while connected for the duration of the run.' };
+  } catch (e) {
+    return { ok: false, detail: `Could not stop the device sleeping: ${(e as Error).message.split('\n')[0]}` };
+  }
+}
+
+/**
  * Wake and unlock the screen. `am start` silently succeeds against a sleeping
  * or locked device while the app never actually reaches the foreground, so this
  * must run before any launch or interaction.
@@ -323,6 +364,9 @@ export interface UiNode {
   clickable: boolean;
   enabled: boolean;
   focused: boolean;
+  /** Container can be scrolled — lets "the screen should be scrollable" be
+   *  asserted against the real hierarchy instead of guessed from prose. */
+  scrollable: boolean;
   bounds: { x1: number; y1: number; x2: number; y2: number };
   center: { x: number; y: number };
 }
@@ -339,13 +383,39 @@ function parseBounds(raw: string) {
  * possible without Appium: every node carries its text, id, and screen bounds,
  * so a step like "Click the Login button" resolves to a genuine tap coordinate.
  */
-export async function dumpUi(serial: string): Promise<UiNode[]> {
-  const remote = '/sdcard/qa-ui-dump.xml';
-  const dump = await shell(serial, `uiautomator dump ${remote}`, 20000);
-  if (!/dumped to/i.test(dump)) return [];
-  const xml = await shell(serial, `cat ${remote}`, 20000);
-  await shell(serial, `rm -f ${remote}`, 8000).catch(() => {});
+/**
+ * The view hierarchy is the hottest read in the whole engine — an overlay check,
+ * the step itself, each settle poll, the expectation assertion and the screen
+ * name all want it, several times per step. Two things make that affordable:
+ *
+ *  - `exec-out uiautomator dump /dev/tty` streams the XML back in ONE adb round
+ *    trip instead of three (dump to a file, `cat` it, `rm` it).
+ *  - Consecutive reads with no input in between cannot differ, so they are
+ *    served from a short-lived cache. Every function that touches the device
+ *    (tap, swipe, text, keyevent, launch) drops the cache, so a cached read can
+ *    never describe a screen the engine has already changed.
+ */
+/**
+ * Measured on real hardware, a single `uiautomator dump` costs ~2.2s — it is by
+ * far the most expensive thing the engine does, and everything else (activity,
+ * logcat, screen size) is ~100ms. The TTL therefore has to comfortably exceed
+ * one dump, or a cached reading expires before the next caller can ever use it
+ * and the cache buys nothing.
+ *
+ * Correctness does NOT rest on this number: it rests on invalidation, which is
+ * driven by input (see MUTATING_CMD_RE). The TTL only bounds how long a reading
+ * can survive a change the engine did not cause — an ad appearing on a timer,
+ * say — so it is kept to a few seconds rather than minutes.
+ */
+const UI_CACHE_TTL_MS = 5000;
+let uiCache: { serial: string; nodes: UiNode[]; at: number } | null = null;
 
+/** Drop the cached hierarchy — called by anything that can change the screen. */
+export function invalidateUiCache(): void {
+  uiCache = null;
+}
+
+function parseUiXml(xml: string): UiNode[] {
   const nodes: UiNode[] = [];
   const attr = (frag: string, name: string) => frag.match(new RegExp(`${name}="([^"]*)"`))?.[1] ?? '';
 
@@ -362,10 +432,44 @@ export async function dumpUi(serial: string): Promise<UiNode[]> {
       clickable: attr(frag, 'clickable') === 'true',
       enabled: attr(frag, 'enabled') === 'true',
       focused: attr(frag, 'focused') === 'true',
+      scrollable: attr(frag, 'scrollable') === 'true',
       bounds,
       center: { x: Math.round((bounds.x1 + bounds.x2) / 2), y: Math.round((bounds.y1 + bounds.y2) / 2) },
     });
   }
+  return nodes;
+}
+
+/**
+ * Dump the live view hierarchy. This is what makes real native step execution
+ * possible without Appium: every node carries its text, id, and screen bounds,
+ * so a step like "Click the Login button" resolves to a genuine tap coordinate.
+ *
+ * Pass `fresh` when the caller is specifically watching for change (settle
+ * polling), so it is never handed the reading it is trying to compare against.
+ */
+export async function dumpUi(serial: string, opts: { fresh?: boolean } = {}): Promise<UiNode[]> {
+  if (!opts.fresh && uiCache && uiCache.serial === serial
+      && Date.now() - uiCache.at < UI_CACHE_TTL_MS) {
+    return uiCache.nodes;
+  }
+
+  // One round trip: uiautomator writes the XML straight to stdout.
+  const streamed = await adb(serial, ['exec-out', 'uiautomator', 'dump', '/dev/tty'], 20000);
+  let nodes = /<node\b/.test(streamed.stdout) ? parseUiXml(streamed.stdout) : [];
+
+  // Some OEM builds/older uiautomator ignore /dev/tty and only write to a file.
+  if (nodes.length === 0) {
+    const remote = '/sdcard/qa-ui-dump.xml';
+    const dump = await shell(serial, `uiautomator dump ${remote}`, 20000);
+    if (/dumped to/i.test(dump)) {
+      const xml = await shell(serial, `cat ${remote}`, 20000);
+      nodes = parseUiXml(xml);
+      await shell(serial, `rm -f ${remote}`, 8000).catch(() => {});
+    }
+  }
+
+  uiCache = { serial, nodes, at: Date.now() };
   return nodes;
 }
 
@@ -407,8 +511,13 @@ export async function waitForUiSettle(
   opts: { timeoutMs?: number; pollMs?: number; stableChecks?: number } = {},
 ): Promise<SettleResult> {
   const timeoutMs = opts.timeoutMs ?? 15000;
-  const pollMs = opts.pollMs ?? 700;
-  const stableChecks = opts.stableChecks ?? 2;
+  // Each poll IS a ~2.2s hierarchy dump, so the dump latency already provides
+  // the spacing an explicit sleep used to. Adding a sleep on top only idles.
+  const pollMs = opts.pollMs ?? 0;
+  // One repeat means two identical readings taken ~2.2s apart — genuinely more
+  // settling evidence than the original 2 repeats gave at 600ms polling, and it
+  // removes a whole dump (~2.2s) from every single step.
+  const stableChecks = opts.stableChecks ?? 1;
 
   const started = Date.now();
   let lastSig = '';
@@ -416,7 +525,10 @@ export async function waitForUiSettle(
   let nodes: UiNode[] = [];
 
   while (Date.now() - started < timeoutMs) {
-    nodes = await dumpUi(serial);
+    // `fresh` is essential, not an optimisation: this loop detects change by
+    // comparing successive readings, so a cached repeat would look like the
+    // screen had gone stable the instant it was asked.
+    nodes = await dumpUi(serial, { fresh: true });
     const sig = uiSignature(nodes);
 
     // A screen showing only a spinner/progress bar is still loading.
@@ -440,6 +552,32 @@ export async function waitForUiSettle(
 }
 
 /**
+ * Wait only as long as the screen actually takes to react.
+ *
+ * A fixed sleep after a tap pays the worst case every single time: too long on a
+ * fast device, still not long enough on a slow one. This returns the moment the
+ * hierarchy differs from `beforeSignature`, so the common case costs one dump
+ * instead of a full second of idling — and the timeout still bounds a tap that
+ * legitimately changed nothing.
+ */
+export async function waitForUiChange(
+  serial: string,
+  beforeSignature: string,
+  timeoutMs = 1500,
+  // A dump already takes ~2.2s, which is the wait; sleeping on top only idles.
+  pollMs = 0,
+): Promise<{ changed: boolean; nodes: UiNode[] }> {
+  const started = Date.now();
+  let nodes = await dumpUi(serial, { fresh: true });
+  while (Date.now() - started < timeoutMs) {
+    if (uiSignature(nodes) !== beforeSignature) return { changed: true, nodes };
+    await new Promise((r) => setTimeout(r, pollMs));
+    nodes = await dumpUi(serial, { fresh: true });
+  }
+  return { changed: uiSignature(nodes) !== beforeSignature, nodes };
+}
+
+/**
  * Wait for the app to move past its splash/launch screen onto real content.
  * Returns once the activity changes away from the launch activity, or the view
  * hierarchy becomes interactive and stable.
@@ -454,13 +592,23 @@ export async function waitForAppReady(
   const splashActivity = launchActivity;
 
   while (Date.now() - started < timeoutMs) {
-    const settle = await waitForUiSettle(serial, { timeoutMs: 6000, pollMs: 600, stableChecks: 2 });
+    const settle = await waitForUiSettle(serial, { timeoutMs: 6000 });
     const activity = settle.activity;
 
     // Lost the app entirely (crash, or it bounced back to the launcher).
     const fg = await foregroundPackage(serial);
     if (fg !== pkg) {
       return { ready: false, activity, detail: `The app left the foreground during startup (now: ${fg ?? 'unknown'}). It may have crashed on launch.` };
+    }
+
+    // A full-screen ad SDK Activity has its own close/skip button, which reads
+    // as "interactive content" — without this check, "the app is ready" fired
+    // the instant an interstitial appeared on launch, so every case behind it
+    // ran against the ad instead of the app. Escaping it here defines
+    // readiness as the APP's own content, never a third-party ad surface.
+    if (isAdActivity(activity)) {
+      await escapeAdSurface(serial, 2);
+      continue;
     }
 
     const interactive = settle.nodes.filter((n) => n.clickable || /EditText/i.test(n.className)).length;
@@ -634,8 +782,9 @@ export async function dismissSystemDialogs(
       if (btn) {
         crashed = true;
         handled.push(`crash/ANR dialog dismissed ("${(btn.text || btn.contentDesc).trim()}")`);
+        const beforeCrashTap = uiSignature(nodes);
         await tap(serial, btn.center.x, btn.center.y);
-        await new Promise((r) => setTimeout(r, 1200));
+        await waitForUiChange(serial, beforeCrashTap, 2000);
         continue;
       }
     }
@@ -645,8 +794,9 @@ export async function dismissSystemDialogs(
       const btn = findForwardAffordance(nodes, ['grant', 'advance', 'dismiss']);
       if (btn) {
         handled.push(`permission dialog: tapped "${(btn.node.text || btn.node.contentDesc).trim()}"`);
+        const beforePermTap = uiSignature(nodes);
         await tap(serial, btn.node.center.x, btn.node.center.y);
-        await new Promise((r) => setTimeout(r, 1200));
+        await waitForUiChange(serial, beforePermTap, 2000);
         continue;
       }
     }
@@ -669,11 +819,44 @@ export async function dismissSystemDialogs(
 export async function ensureAppForeground(
   serial: string,
   pkg: string,
-): Promise<{ ok: boolean; recovered: boolean; detail: string }> {
+  /**
+   * Skip when the test case currently running is itself about ad behaviour —
+   * an interstitial must never be auto-dismissed out from under a case whose
+   * whole point is to verify it.
+   */
+  avoidAds = true,
+): Promise<{ ok: boolean; recovered: boolean; detail: string; deviceLost?: boolean }> {
+  // Distinguish "the cable dropped" from "the app moved". Without this a
+  // disconnected device reads as an application defect on every remaining case.
+  if (!(await deviceOnline(serial))) {
+    return {
+      ok: false, recovered: false, deviceLost: true,
+      detail: `The device ${serial} is no longer responding to adb — it was disconnected, powered off, or its USB authorisation was revoked mid-run. Reconnect it and start a new run.`,
+    };
+  }
+
   const dialogs = await dismissSystemDialogs(serial);
+
+  // A slept screen takes the app out of the foreground; wake first so a sleeping
+  // device is not misreported as the app having crashed or drifted.
+  await ensureAwake(serial).catch(() => null);
 
   const fg = await foregroundPackage(serial);
   if (fg === pkg) {
+    // The package matches, but a full-screen ad SDK Activity is declared
+    // inside the app's OWN package — package equality alone cannot tell an ad
+    // apart from real content, which is exactly what let every case behind an
+    // interstitial silently run against the ad instead of the app.
+    if (avoidAds) {
+      const activity = await currentActivity(serial);
+      if (isAdActivity(activity)) {
+        const cleared = await escapeAdSurface(serial);
+        return {
+          ok: cleared.escaped, recovered: cleared.escaped,
+          detail: `${cleared.detail}${dialogs.handled.length > 0 ? ` ${dialogs.handled.join('; ')}.` : ''}`,
+        };
+      }
+    }
     return {
       ok: true, recovered: false,
       detail: dialogs.handled.length > 0 ? `App in foreground. ${dialogs.handled.join('; ')}.` : 'App is in the foreground.',
@@ -686,23 +869,41 @@ export async function ensureAppForeground(
   // a tester would do, and it preserves the app's existing task/state.
   for (let i = 0; i < 3; i++) {
     if ((await foregroundPackage(serial)) === pkg) break;
+    const beforeBack = uiSignature(await dumpUi(serial));
     await pressKey(serial, 'KEYCODE_BACK');
-    await new Promise((r) => setTimeout(r, 900));
+    await waitForUiChange(serial, beforeBack, 1200);
   }
 
   if ((await foregroundPackage(serial)) === pkg) {
+    if (avoidAds && isAdActivity(await currentActivity(serial))) await escapeAdSurface(serial);
     return { ok: true, recovered: true, detail: `App had drifted to "${fg ?? 'unknown'}"; backed out of it and returned to the app.` };
   }
 
   const relaunch = await launchApp(serial, pkg, 20000);
+  if ((await foregroundPackage(serial)) === pkg) {
+    if (avoidAds && isAdActivity(await currentActivity(serial))) await escapeAdSurface(serial);
+    return {
+      ok: true, recovered: true,
+      detail: `App had drifted to "${fg ?? 'unknown'}" and was brought back to the foreground.${dialogs.crashed ? ' A crash/ANR dialog was cleared first.' : ''}`,
+    };
+  }
+
+  // Last resort: a cold start. A warm relaunch reuses the existing task, which
+  // stays broken if that task is what drifted (or was backed out of entirely);
+  // force-stopping first guarantees a clean process. Without this the run keeps
+  // going against whatever IS on screen — the launcher, a browser — and every
+  // remaining case reports garbage against the wrong app.
+  await stopApp(serial, pkg).catch(() => {});
+  await new Promise((r) => setTimeout(r, 800));
+  const cold = await launchApp(serial, pkg, 25000);
   const nowFg = await foregroundPackage(serial);
   const ok = nowFg === pkg;
   return {
     ok,
     recovered: ok,
     detail: ok
-      ? `App had drifted to "${fg ?? 'unknown'}" and was brought back to the foreground.${dialogs.crashed ? ' A crash/ANR dialog was cleared first.' : ''}`
-      : `App is not in the foreground (currently "${nowFg ?? 'unknown'}") and could not be restored: ${relaunch.message}`,
+      ? `App had drifted to "${fg ?? 'unknown'}" and was restored with a cold restart.${dialogs.crashed ? ' A crash/ANR dialog was cleared first.' : ''}`
+      : `App is not in the foreground (currently "${nowFg ?? 'unknown'}") and could not be restored after a warm relaunch (${relaunch.message}) or a cold restart (${cold.message}).`,
   };
 }
 
@@ -743,12 +944,271 @@ export async function dismissBlockingOverlay(
     if (!target) break;
 
     const label = (target.text || target.contentDesc || 'close icon').trim();
+    const before = uiSignature(nodes);
     await tap(serial, target.center.x, target.center.y);
-    await new Promise((r) => setTimeout(r, 900));
+    // Continue as soon as the overlay is actually gone rather than always
+    // paying a fixed pause — this runs before every step, so it is on the
+    // hottest path in the engine.
+    await waitForUiChange(serial, before, 1500);
     handled.push(`dismissed overlay ("${label}")`);
   }
 
   return { handled };
+}
+
+/**
+ * Labels that are a screen's own way forward, so they must never be mistaken
+ * for one of the *choices* on a selection gate.
+ */
+const GATE_CONTROL_LABELS = new Set([
+  ...ADVANCE_LABELS, ...GRANT_LABELS, ...DISMISS_LABELS,
+]);
+
+/**
+ * Resource ids belonging to embedded advertising. Delimiter-anchored so ordinary
+ * words that merely contain "ad" ("download", "header", "loading") are not
+ * caught. Ad views sit inside the app's own screens and are fully clickable —
+ * tapping one opens the Play Store or a browser and takes the run out of the app
+ * under test entirely, so they are excluded from every automatic interaction.
+ */
+const AD_ID_RE = /(?:^|[_.\/])ads?(?:[_.]|$)|native_?ad|ad_?view|ad_?container|advert/i;
+
+function isAdNode(nodes: UiNode[], node: UiNode): boolean {
+  if (AD_ID_RE.test(node.resourceId)) return true;
+  return nodes.some((o) => o !== node && AD_ID_RE.test(o.resourceId) && containsNode(o, node));
+}
+
+/**
+ * A confirm/next control that carries no text, no accessibility label and no
+ * resource id — just an icon. These are common on first-run gates (a tick or
+ * arrow in the header's trailing corner) and are invisible to label- and
+ * id-based matching, which is what left a language picker impassable.
+ *
+ * Identified by position and shape only: a small, isolated clickable icon in the
+ * header's trailing corner, or a wide control in the bottom action bar. Ads are
+ * excluded, and a screen must have real content for this to apply.
+ */
+function findIconAffordance(
+  nodes: UiNode[],
+  screen: { width: number; height: number },
+): UiNode | null {
+  if (screen.width <= 0 || screen.height <= 0) return null;
+
+  const scrollers = nodes.filter((n) => n.scrollable);
+  const candidates = nodes.filter((n) => {
+    if (!n.clickable || !n.enabled) return false;
+    if ((n.text || n.contentDesc).trim().length > 0) return false;
+    if (isAdNode(nodes, n)) return false;
+    // An unlabelled icon inside a scrolling list is part of a row (a radio, a
+    // thumbnail), never the screen's confirm action.
+    if (scrollers.some((s) => s !== n && containsNode(s, n))) return false;
+    const w = n.bounds.x2 - n.bounds.x1;
+    const h = n.bounds.y2 - n.bounds.y1;
+    if (w <= 0 || h <= 0) return false;
+    // A full-screen clickable overlay is not a button.
+    if (w >= screen.width * 0.98 && h >= screen.height * 0.5) return false;
+    return true;
+  });
+  if (candidates.length === 0) return null;
+
+  const topBand = screen.height * 0.18;
+  const bottomBand = screen.height * 0.82;
+
+  // Trailing corner of the header — where "Done"/"Next" lives on a gate screen.
+  const headerTrailing = candidates
+    .filter((n) => n.bounds.y1 <= topBand && n.center.x >= screen.width * 0.6)
+    .sort((a, b) => b.center.x - a.center.x)[0];
+  if (headerTrailing) return headerTrailing;
+
+  // Otherwise a control in the bottom action bar.
+  const bottomBar = candidates
+    .filter((n) => n.bounds.y1 >= bottomBand && (n.bounds.x2 - n.bounds.x1) >= screen.width * 0.4)
+    .sort((a, b) => b.bounds.y1 - a.bounds.y1)[0];
+  return bottomBar ?? null;
+}
+
+/**
+ * Pick a plausible selectable choice on a gate screen (a language, theme, or
+ * plan picker). Identified structurally — a clickable, labelled item that lives
+ * in a scrollable container or sits among several similar siblings — never by
+ * matching a specific app's option names.
+ */
+function findSelectableChoice(nodes: UiNode[]): UiNode | null {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const scrollers = nodes.filter((n) => n.scrollable);
+
+  const candidates = nodes.filter((n) => {
+    if (!n.clickable || !n.enabled) return false;
+    const label = (n.text || n.contentDesc).trim();
+    if (label.length < 2) return false;
+    // Never treat the screen's forward/dismiss control as a choice.
+    if (GATE_CONTROL_LABELS.has(norm(label))) return false;
+    // An embedded ad's headline and call-to-action are clickable and labelled,
+    // so they look exactly like options — tapping one leaves the app.
+    if (isAdNode(nodes, n)) return false;
+    const area = nodeArea(n);
+    if (area <= 0) return false;
+    return true;
+  });
+
+  // Prefer choices inside a scrollable list — the classic picker shape.
+  const inScroller = candidates.filter((c) => scrollers.some((s) => containsNode(s, c)));
+  const pool = inScroller.length >= 2 ? inScroller : candidates;
+  // Several comparable siblings is what distinguishes a list of options from a
+  // lone action button, so require more than one before treating these as choices.
+  if (pool.length < 2) return null;
+
+  // Topmost option: on a picker the first row is the safest, most predictable
+  // choice, and matches what a tester reaching for "select any option" does.
+  return pool.slice().sort((a, b) => a.bounds.y1 - b.bounds.y1)[0] ?? null;
+}
+
+/**
+ * Move the app forward off an intermediate "gate" screen — a language picker,
+ * onboarding slide, consent notice, or permission prompt — that the sheet's
+ * current step never mentions but which blocks every element lookup behind it.
+ *
+ * Entirely structural: it reads the live hierarchy for a forward affordance,
+ * and when that control is gated behind making a selection it picks an option
+ * first. No app-specific screen names, ids, or flow order are encoded, so this
+ * works on a screen the engine has never seen. Only ever called as a recovery
+ * step after the step's own target could not be found, so it cannot race the
+ * sheet's intended interaction.
+ */
+export async function advancePastGateScreen(
+  serial: string,
+  pkg: string | null,
+): Promise<{ advanced: boolean; detail: string }> {
+  const nodes = await dumpUi(serial);
+  if (nodes.length === 0) return { advanced: false, detail: 'The screen exposed no view hierarchy to work with.' };
+
+  const before = uiSignature(nodes);
+  const beforeActivity = await currentActivity(serial);
+  const screen = await screenSize(serial).catch(() => ({ width: 0, height: 0 }));
+  const actions: string[] = [];
+
+  const iconForward = (ns: UiNode[]) => {
+    const icon = findIconAffordance(ns, screen);
+    return icon ? { node: icon, intent: 'advance' as ForwardIntent } : null;
+  };
+
+  // An explicitly labelled control is the least ambiguous way forward.
+  let forward = findForwardAffordance(nodes, ['advance', 'grant', 'dismiss']);
+
+  // Otherwise behave like a tester on a picker: choose an option, then confirm.
+  // Selecting first matters — a confirm control is often inert or absent until
+  // a choice has been made.
+  if (!forward) {
+    const choice = findSelectableChoice(nodes);
+    if (choice) {
+      const label = (choice.text || choice.contentDesc).trim();
+      await tap(serial, choice.center.x, choice.center.y);
+      // Selecting an option usually enables or reveals the confirm control;
+      // wait for that to actually happen instead of guessing a duration.
+      await waitForUiChange(serial, before, 1500);
+      actions.push(`selected the option "${label}"`);
+      const after = await dumpUi(serial);
+      forward = findForwardAffordance(after, ['advance', 'grant', 'dismiss']) ?? iconForward(after);
+      // Choosing an option can itself advance the screen (single-tap pickers).
+      if (!forward && uiSignature(after) !== before) {
+        return { advanced: true, detail: `Advanced past an intermediate screen: ${actions.join(', then ')}.` };
+      }
+    }
+  }
+
+  // Last resort: an unlabelled confirm icon on a screen with no options to pick.
+  if (!forward) forward = iconForward(nodes);
+
+  if (!forward) {
+    return {
+      advanced: false,
+      detail: actions.length > 0
+        ? `Tried to advance (${actions.join(', then ')}) but no control was available to continue.`
+        : 'No forward control or selectable option was available to move past this screen.',
+    };
+  }
+
+  const label = (forward.node.text || forward.node.contentDesc).trim() || forward.intent;
+  await tap(serial, forward.node.center.x, forward.node.center.y);
+  const settled = await waitForUiSettle(serial, { timeoutMs: 12000 });
+  actions.push(`tapped "${label}" (${forward.intent})`);
+
+  const moved = settled.signature !== before || settled.activity !== beforeActivity;
+  if (!moved) {
+    return { advanced: false, detail: `Tried to advance (${actions.join(', then ')}) but the screen did not change.` };
+  }
+
+  // Landing on a different app means we advanced out of the app under test,
+  // which is worse than being stuck — report it rather than calling it progress.
+  if (pkg) {
+    const fg = await foregroundPackage(serial);
+    if (fg !== pkg) {
+      return { advanced: false, detail: `Advancing (${actions.join(', then ')}) left the app under test and landed on "${fg ?? 'unknown'}".` };
+    }
+  }
+
+  return { advanced: true, detail: `Advanced past an intermediate screen: ${actions.join(', then ')}.` };
+}
+
+/**
+ * Class-name conventions of the Activity a third-party ad SDK uses to render a
+ * full-screen interstitial. These are generic ad-network SDK internals used
+ * across thousands of unrelated apps (not this app's own code), which is why
+ * matching on them is not "hardcoding an app's flow" — it is exactly the same
+ * kind of vocabulary-based detection used for permission dialogs.
+ *
+ * This exists because such an Activity is declared inside the HOST APP'S OWN
+ * package (that is how the Google/Meta/etc. ad SDKs integrate), so it passes a
+ * plain foregroundPackage() === pkg check even though it is not the app's real
+ * content — an ad was silently treated as "the current screen" and every
+ * lookup against it failed for the wrong reason.
+ */
+const AD_ACTIVITY_RE = /\b(?:ads?\.AdActivity|com\.google\.android\.gms\.ads|com\.unity3d\.services\.ads|com\.applovin\.(?:mediation|sdk)|com\.ironsource\.(?:mediationsdk|sdk)|com\.vungle|com\.chartboost|com\.mbridge|com\.adcolony|com\.inmobi\.ads|com\.startapp|com\.facebook\.ads|com\.mopub|com\.tapjoy|com\.pubmatic|com\.smaato|com\.fyber)\b/i;
+
+/** Is the given Activity a third-party ad SDK's own rendering surface? */
+export function isAdActivity(activity: string | null): boolean {
+  return !!activity && AD_ACTIVITY_RE.test(activity);
+}
+
+/**
+ * Get a full-screen interstitial off the screen and confirm the app's own
+ * activity is back in front, without ever tapping the ad's own creative.
+ *
+ * Bounded and patient: many ad SDKs only reveal their close/skip control after
+ * a few seconds, so this retries a few times with a real pause rather than
+ * giving up after one look — but it is only ever invoked when an ad activity
+ * was genuinely detected, so it costs nothing on the (overwhelmingly common)
+ * steps where no ad is showing.
+ */
+export async function escapeAdSurface(
+  serial: string,
+  maxAttempts = 5,
+): Promise<{ escaped: boolean; detail: string }> {
+  let sawAd = false;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const activity = await currentActivity(serial);
+    if (!isAdActivity(activity)) {
+      return {
+        escaped: true,
+        detail: sawAd ? `Advertisement cleared after ${attempt} dismissal attempt(s).` : 'No advertisement was blocking the screen.',
+      };
+    }
+    sawAd = true;
+    const dismissed = await dismissBlockingOverlay(serial, 1);
+    if (dismissed.handled.length === 0) {
+      // No labelled close/skip control yet — back out rather than tap
+      // anywhere on the ad's own creative.
+      await pressKey(serial, 'KEYCODE_BACK');
+    }
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+  const stillAd = isAdActivity(await currentActivity(serial));
+  return {
+    escaped: !stillAd,
+    detail: stillAd
+      ? `An advertisement is still on screen after ${maxAttempts} dismissal attempts.`
+      : `Advertisement cleared after ${maxAttempts} dismissal attempt(s).`,
+  };
 }
 
 /** All on-screen text, used for expectation assertions. */
@@ -816,11 +1276,16 @@ export function findNode(nodes: UiNode[], label: string, opts: { editable?: bool
 
 // --------------------------------------------------------------------- input
 
+// Every input below changes what is on screen, so each drops the cached
+// hierarchy. That invariant is what makes caching reads safe.
+
 export async function tap(serial: string, x: number, y: number): Promise<void> {
+  invalidateUiCache();
   await shell(serial, `input tap ${x} ${y}`, 12000);
 }
 
 export async function inputText(serial: string, value: string): Promise<void> {
+  invalidateUiCache();
   // adb input text has no escaping for spaces/specials — encode them.
   const escaped = value
     .replace(/(["'\\$`&|<>();*~#])/g, '\\$1')
@@ -829,17 +1294,30 @@ export async function inputText(serial: string, value: string): Promise<void> {
 }
 
 export async function pressKey(serial: string, keycode: string): Promise<void> {
+  invalidateUiCache();
   await shell(serial, `input keyevent ${keycode}`, 12000);
 }
 
 export async function swipe(serial: string, x1: number, y1: number, x2: number, y2: number, ms = 300): Promise<void> {
+  invalidateUiCache();
   await shell(serial, `input swipe ${x1} ${y1} ${x2} ${y2} ${ms}`, 15000);
 }
 
+/**
+ * Physical screen size. Fixed for the life of a run, so it is read once per
+ * device rather than on every gesture and gate check.
+ */
+const screenSizeCache = new Map<string, { width: number; height: number }>();
+
 export async function screenSize(serial: string): Promise<{ width: number; height: number }> {
+  const hit = screenSizeCache.get(serial);
+  if (hit) return hit;
   const out = await shell(serial, 'wm size', 10000);
   const m = (out.match(/Override size:\s*(\d+)x(\d+)/) ?? out.match(/Physical size:\s*(\d+)x(\d+)/));
-  return m ? { width: Number(m[1]), height: Number(m[2]) } : { width: 1080, height: 1920 };
+  const size = m ? { width: Number(m[1]), height: Number(m[2]) } : { width: 1080, height: 1920 };
+  // Only remember a genuine reading, so a transient adb failure is not cached.
+  if (m) screenSizeCache.set(serial, size);
+  return size;
 }
 
 // ------------------------------------------------------------ crash / logging
