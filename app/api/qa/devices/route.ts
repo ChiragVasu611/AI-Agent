@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth/session';
+import { requireApiPermission } from '@/lib/auth/api-guard';
 import { connectWireless, pairWireless, disconnectWireless } from '@/lib/qa/adb';
 import { scanDevices } from '@/lib/qa/device-detect';
 
@@ -9,8 +9,8 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function GET() {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  const gate = await requireApiPermission('workspace:qa');
+  if (!gate.ok) return gate.response;
 
   const scan = await scanDevices();
   const online = scan.devices.filter((d) => d.state === 'online');
@@ -30,8 +30,8 @@ export async function GET() {
  * the Android 11+ pairing flow with a 6-digit code shown on the phone.
  */
 export async function POST(req: Request) {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  const gate = await requireApiPermission('workspace:qa');
+  if (!gate.ok) return gate.response;
 
   let body: { action?: string; host?: string; port?: string | number; code?: string };
   try {

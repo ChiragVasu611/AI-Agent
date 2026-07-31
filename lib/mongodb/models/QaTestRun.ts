@@ -30,6 +30,13 @@ const qaTestRunSchema = new Schema({
 
   currentSuite: { type: String, default: null },
   currentCase: { type: String, default: null },
+  // The sheet's own columns, kept as their own fields rather than concatenated
+  // into `currentCase`. Live Tracking has to label the Module, the Test Case ID
+  // and the Test Case separately, which a single "TC-001: scenario" string
+  // cannot be split back into reliably (scenarios contain colons).
+  currentModule: { type: String, default: null },
+  currentTestCaseId: { type: String, default: null },
+  currentScenario: { type: String, default: null },
   currentStep: { type: String, default: null },
   currentScreen: { type: String, default: null },
   currentFeature: { type: String, default: null },

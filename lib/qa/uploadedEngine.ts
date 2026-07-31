@@ -473,7 +473,10 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
       const caseStart = Date.now();
 
       run.currentSuite = tc.module;
+      run.currentModule = tc.module;
       run.currentFeature = tc.feature;
+      run.currentTestCaseId = tc.testCaseId;
+      run.currentScenario = tc.scenario;
       run.currentCase = `${tc.testCaseId}: ${tc.scenario}`;
       run.currentExpected = tc.expectedResult ?? '';
       run.currentActual = '';
@@ -526,16 +529,11 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
         run.currentStep = `Step ${si + 1}/${tc.steps.length}: ${instruction}`;
         await run.save();
 
-        // Once a step has failed, the app is off the expected path — the rest
-        // are reported as skipped rather than executed against a wrong state.
-        if (firstFailedStepIndex !== null) {
-          stepRecords.push({
-            stepNumber: si + 1, action: action.kind, instruction, status: 'skipped',
-            actual: 'Not executed — a previous step in this test case already failed.',
-            assertion: 'none', durationMs: 0, url: session.page.url(), screenshotDataUrl: null,
-          });
-          continue;
-        }
+        // Every step in the sheet is executed, including the ones after a
+        // failure. Skipping them used to hide whether they work at all: one
+        // early failure reported the whole rest of the case as "not executed",
+        // which reads as the engine having stopped and leaves the remaining
+        // steps permanently unverified. Each step now reports its own verdict.
 
         // Proactively clear a cookie-consent banner or modal before even
         // attempting the step — these are never what the sheet's step is
@@ -603,8 +601,14 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
         await run.save();
 
         if (status === 'fail' || status === 'blocked') {
-          firstFailedStepIndex = si;
-          firstFailureDetail = actual;
+          // FIRST failure only. Now that a failure no longer skips the remaining
+          // steps, this runs for every later failure too — without the guard the
+          // "first failed step" would drift to the LAST one, so both the case
+          // verdict and the bug's failedStepNumber would point at the wrong step.
+          if (firstFailedStepIndex === null) {
+            firstFailedStepIndex = si;
+            firstFailureDetail = actual;
+          }
           await log(runId, 'error', status === 'fail' ? 'error' : 'warn', `[${tc.testCaseId}] Step ${si + 1} ${status.toUpperCase()}: ${actual}`);
         } else {
           await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1} PASS: ${actual}`);
@@ -612,15 +616,17 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
       }
 
       // ---- Validate the case-level Expected Result against the live page. ----
-      // A whole case is never 'skipped' here — only individual steps are, once
-      // an earlier step in the same case has already failed.
+      // Every step ran, so this is a roll-up of verdicts already reached rather
+      // than the first place failure is noticed.
       let finalResult: 'pass' | 'fail' | 'blocked';
       let finalActual: string;
 
       if (firstFailedStepIndex !== null) {
         const failedRec = stepRecords[firstFailedStepIndex];
         finalResult = failedRec.status === 'blocked' ? 'blocked' : 'fail';
-        finalActual = `Step ${firstFailedStepIndex + 1} ("${failedRec.instruction}") ${failedRec.status === 'blocked' ? 'could not be executed' : 'failed'}: ${firstFailureDetail}`;
+        const alsoFailed = stepRecords.filter((s, idx) => idx !== firstFailedStepIndex && s.status === 'fail').length;
+        finalActual = `Step ${firstFailedStepIndex + 1} ("${failedRec.instruction}") ${failedRec.status === 'blocked' ? 'could not be executed' : 'failed'}: ${firstFailureDetail}`
+          + (alsoFailed > 0 ? ` A further ${alsoFailed} step(s) in this test case also failed — see the per-step results.` : '');
       } else {
         // Same reasoning as per-step: a cookie banner or modal must never be
         // mistaken for the app's genuine expected-result state.

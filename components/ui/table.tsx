@@ -20,7 +20,15 @@ const TableHeader = React.forwardRef<
   HTMLTableSectionElement,
   React.HTMLAttributes<HTMLTableSectionElement>
 >(({ className, ...props }, ref) => (
-  <thead ref={ref} className={cn('[&_tr]:border-b', className)} {...props} />
+  <thead
+    ref={ref}
+    // Sticky within whatever scrolling ancestor actually scrolls — the
+    // Table's own `overflow-auto` wrapper for a plain table, or an outer
+    // scroll container a page wraps it in. `bg-card` keeps header text
+    // legible over rows scrolling underneath rather than turning transparent.
+    className={cn('sticky top-0 z-10 bg-card [&_tr]:border-b', className)}
+    {...props}
+  />
 ));
 TableHeader.displayName = 'TableHeader';
 
@@ -58,7 +66,7 @@ const TableRow = React.forwardRef<
   <tr
     ref={ref}
     className={cn(
-      'border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted',
+      'border-b transition-colors hover:bg-accent/40 data-[state=selected]:bg-accent/60',
       className
     )}
     {...props}

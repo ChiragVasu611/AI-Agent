@@ -544,10 +544,17 @@ export interface QaTestRun {
   executedByName: string;
   currentSuite: string | null;
   currentCase: string | null;
+  currentModule: string | null;
+  currentTestCaseId: string | null;
+  currentScenario: string | null;
   currentStep: string | null;
   currentScreen: string | null;
   currentFeature: string | null;
   currentDevice: string | null;
+  /** Live per-step tracking, written by the engines during execution. */
+  currentExpected: string;
+  currentActual: string;
+  currentStepStatus: 'running' | 'pass' | 'fail' | 'blocked' | 'skipped';
   startedAt: string | null;
   completedAt: string | null;
   estimatedSeconds: number | null;

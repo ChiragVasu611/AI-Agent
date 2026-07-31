@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth/session';
+import { requireApiPermission } from '@/lib/auth/api-guard';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
@@ -30,8 +30,9 @@ export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  const gate = await requireApiPermission('workspace:qa');
+  if (!gate.ok) return gate.response;
+  const user = gate.user;
 
   let formData: FormData;
   try {
@@ -82,12 +83,11 @@ export async function POST(req: Request) {
     const dbUser = await User.findById(user.id).lean<{ qaOpenRouterApiKey: string | null }>();
     apiKey = dbUser?.qaOpenRouterApiKey ?? null;
   } catch (e) {
+    // The console.error above is the record. This used to also append the stack
+    // to a qa-upload-debug.log in process.cwd() — debug scaffolding that wrote
+    // an untracked file into the project root on every failure and duplicated
+    // what the server log already has.
     console.error('QA start-binary: database error while creating project/run', e);
-    try {
-      const { appendFileSync } = await import('fs');
-      const { join } = await import('path');
-      appendFileSync(join(process.cwd(), 'qa-upload-debug.log'), `[${new Date().toISOString()}] DB error: ${(e as Error)?.message}\n${(e as Error)?.stack ?? ''}\n\n`);
-    } catch { /* ignore */ }
     return NextResponse.json(
       { error: `Could not save the run to the database: ${(e as Error)?.message ?? 'unknown error'}` },
       { status: 500 },

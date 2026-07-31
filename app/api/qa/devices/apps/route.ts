@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth/session';
+import { requireApiPermission } from '@/lib/auth/api-guard';
 import { listDevices, listInstalledApps } from '@/lib/qa/adb';
 
 export const runtime = 'nodejs';
@@ -16,8 +16,8 @@ export const runtime = 'nodejs';
  * into an adb invocation.
  */
 export async function GET(req: Request) {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  const gate = await requireApiPermission('workspace:qa');
+  if (!gate.ok) return gate.response;
 
   const requested = new URL(req.url).searchParams.get('serial')?.trim() || '';
 

@@ -322,10 +322,12 @@ export default function TestCaseExecutionPage() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [runId]);
 
-  // Real-time device streaming: one freshly captured frame per tick, so the
-  // panel follows the device continuously instead of only updating when a step
-  // completes. Server-side throttling keeps this from competing with the
-  // engine's own device calls, and each response carries a single image.
+  // Real-time device streaming: picks up the engine's latest stored step
+  // screenshot, so the panel follows execution without ever touching the
+  // device itself from this route (see live-frame/route.ts — a previous
+  // version captured independently on a timer and measured an 8s stall from
+  // contending with the engine's own adb calls). A plain DB read is cheap
+  // enough to poll quickly with no downside.
   useEffect(() => {
     if (!runId || run?.status !== 'running') {
       setLiveFrame(null);
@@ -337,9 +339,9 @@ export default function TestCaseExecutionPage() {
       const res = await fetch(`/api/qa/runs/${runId}/live-frame`).then((r) => r.json()).catch(() => null);
       if (cancelled) return;
       if (res?.frame) setLiveFrame(res.frame);
-      // Chained rather than a fixed interval, so a slow capture cannot pile up
-      // overlapping requests and make the stream lag further behind.
-      timer = setTimeout(pump, 1000);
+      // Chained rather than a fixed interval, so a slow response cannot pile up
+      // overlapping requests.
+      timer = setTimeout(pump, 500);
     }
     pump();
     return () => { cancelled = true; clearTimeout(timer); };
@@ -811,21 +813,29 @@ export default function TestCaseExecutionPage() {
                   <span className="text-xs text-muted-foreground">{run.progress}%</span>
                 </div>
                 <Progress value={run.progress} className="h-2" />
+                {/*
+                  Every tile reads the run document's own live field. Expected /
+                  Actual / Pass-Fail used to come from `lastEvaluated` — the last
+                  COMPLETED case — so during a run they described the previous
+                  test case while the header above them said "Live". The engines
+                  write currentExpected/currentActual/currentStepStatus on every
+                  step, so the live values are what belong here.
+                */}
                 <div className="mt-4 grid grid-cols-2 gap-3 text-xs sm:grid-cols-3">
-                  <div><div className="text-muted-foreground">Current Scenario</div><div className="truncate font-medium" title={run.currentSuite ?? undefined}>{run.currentSuite ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Test Case ID</div><div className="truncate font-medium" title={run.currentCase ?? undefined}>{run.currentCase ?? '—'}</div></div>
+                  <div><div className="text-muted-foreground">Current Module</div><div className="truncate font-medium" title={run.currentModule ?? run.currentSuite ?? undefined}>{run.currentModule ?? run.currentSuite ?? '—'}</div></div>
+                  <div><div className="text-muted-foreground">Current Test Case ID</div><div className="truncate font-medium" title={run.currentTestCaseId ?? run.currentCase ?? undefined}>{run.currentTestCaseId ?? run.currentCase ?? '—'}</div></div>
+                  <div><div className="text-muted-foreground">Current Test Case</div><div className="truncate font-medium" title={run.currentScenario ?? undefined}>{run.currentScenario ?? '—'}</div></div>
                   <div><div className="text-muted-foreground">Current Test Step</div><div className="truncate font-medium" title={run.currentStep ?? undefined}>{run.currentStep ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Feature</div><div className="truncate font-medium" title={run.currentFeature ?? undefined}>{run.currentFeature ?? '—'}</div></div>
                   <div><div className="text-muted-foreground">Current Screen</div><div className="truncate font-medium" title={run.currentScreen ?? undefined}>{run.currentScreen ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Step Number</div><div className="font-medium">{testCases.filter((t) => t.result !== 'pending').length} / {testCases.length || run.totalCases}</div></div>
-                  <div><div className="text-muted-foreground">Expected Result</div><div className="truncate font-medium" title={lastEvaluated?.expectedResult ?? undefined}>{lastEvaluated?.expectedResult ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Actual Result</div><div className="truncate font-medium" title={lastEvaluated?.actualResult ?? undefined}>{lastEvaluated?.actualResult ?? '—'}</div></div>
+                  <div><div className="text-muted-foreground">Current Feature</div><div className="truncate font-medium" title={run.currentFeature ?? undefined}>{run.currentFeature ?? '—'}</div></div>
+                  <div><div className="text-muted-foreground">Expected Result</div><div className="truncate font-medium" title={run.currentExpected || lastEvaluated?.expectedResult || undefined}>{run.currentExpected || lastEvaluated?.expectedResult || '—'}</div></div>
+                  <div><div className="text-muted-foreground">Actual Result</div><div className="truncate font-medium" title={run.currentActual || lastEvaluated?.actualResult || undefined}>{run.currentActual || lastEvaluated?.actualResult || '—'}</div></div>
                   <div>
                     <div className="text-muted-foreground">Pass / Fail Status</div>
-                    {lastEvaluated ? (
+                    {run.currentStepStatus && run.currentStepStatus !== 'running' ? (
                       <span className="inline-flex items-center gap-1.5">
-                        <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[lastEvaluated.result])} />
-                        <Badge className={`${STATUS_BADGE[lastEvaluated.result]} text-[10px]`}>{lastEvaluated.result}</Badge>
+                        <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[run.currentStepStatus] ?? 'bg-muted-foreground')} />
+                        <Badge className={`${STATUS_BADGE[run.currentStepStatus] ?? STATUS_BADGE.pending} text-[10px]`}>{run.currentStepStatus}</Badge>
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1.5">
@@ -941,33 +951,49 @@ export default function TestCaseExecutionPage() {
               </div>
             </div>
             {!run ? (
-              <Skeleton className="mx-auto aspect-[9/16] max-h-[420px] w-full rounded-xl" />
+              <Skeleton className="mx-auto h-[min(58vh,440px)] min-h-[280px] w-full rounded-[22px]" />
             ) : (
               <>
-                {/* object-contain, so the whole device screen stays visible at
-                    its real aspect ratio instead of being cropped to fill. */}
-                <div className="mx-auto grid aspect-[9/16] max-h-[420px] place-items-center overflow-hidden rounded-xl border border-border bg-secondary/20">
-                  {liveFrame || screenshots.length > 0 ? (
-                    <img
-                      src={liveFrame ?? screenshots[screenshots.length - 1].imageDataUrl}
-                      alt="Current device screen"
-                      className="h-full w-full object-contain"
-                    />
-                  ) : run.engineMode === 'real_browser' ? (
-                    <Globe className="h-8 w-8 text-muted-foreground" />
-                  ) : (
-                    <Smartphone className="h-8 w-8 text-muted-foreground" />
-                  )}
+                {/*
+                  Device frame: a fixed-HEIGHT, flexible-width bezel — deliberately
+                  NOT a CSS aspect-ratio box. Combining `aspect-[..]` with a
+                  `max-h-[..]` clamp (the previous approach) made the box's
+                  rendered shape disagree with its own declared ratio once the
+                  clamp kicked in, and a percentage-sized child (`h-full` on the
+                  <img>) could then compute against the pre-clamp height in some
+                  browsers — cropping the bottom via overflow-hidden.
+                  A plain fixed-height box sidesteps that class of bug entirely:
+                  object-contain letterboxes the real device frame (whatever its
+                  actual ratio — 16:9, 18:9, 20:9, tablets, anything) to fit
+                  inside, full stop. Never crops, never stretches.
+                */}
+                <div className="relative mx-auto flex h-[min(58vh,440px)] min-h-[280px] w-full items-center justify-center rounded-[22px] border-[3px] border-neutral-800 bg-black p-2 shadow-lg dark:border-neutral-700">
+                  {/* Speaker/notch cutout — purely cosmetic, gives the frame a
+                      device-like silhouette without assuming a specific model. */}
+                  <div className="pointer-events-none absolute left-1/2 top-0 z-10 h-3.5 w-16 -translate-x-1/2 rounded-b-lg bg-neutral-800 dark:bg-neutral-700" />
+                  <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl bg-secondary/20">
+                    {liveFrame || screenshots.length > 0 ? (
+                      <img
+                        src={liveFrame ?? screenshots[screenshots.length - 1].imageDataUrl}
+                        alt="Current device screen"
+                        className="h-full w-full object-contain"
+                      />
+                    ) : run.engineMode === 'real_browser' ? (
+                      <Globe className="h-8 w-8 text-muted-foreground" />
+                    ) : (
+                      <Smartphone className="h-8 w-8 text-muted-foreground" />
+                    )}
+                  </div>
                 </div>
-                {/* The "Live Test Execution" card in the main column already
-                    breaks out Module/TC/Step/Expected/Actual in full — this is
-                    just enough context to read the frame on its own, plus the
-                    in-flight step's own verdict (that card only has the last
-                    *completed* case's, one step behind during a run). */}
+                {/* The "Live Test Execution" card in the main column breaks out
+                    Module/TC ID/Test Case/Step/Expected/Actual/verdict in full,
+                    all from the same live run fields. This strip repeats only
+                    enough to read the frame on its own. */}
                 <div className="mt-2 space-y-1.5 text-[11px]">
-                  {(run.currentSuite || run.currentCase) && (
+                  {(run.currentModule || run.currentTestCaseId || run.currentSuite) && (
                     <div className="truncate font-medium text-foreground">
-                      {run.currentSuite}{run.currentSuite && run.currentCase ? ' · ' : ''}{run.currentCase}
+                      {[run.currentModule ?? run.currentSuite, run.currentTestCaseId ?? run.currentCase]
+                        .filter(Boolean).join(' · ')}
                     </div>
                   )}
                   {run.currentStep && (

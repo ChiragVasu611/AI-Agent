@@ -1,7 +1,7 @@
 'use server';
 
+import { requireWorkspaceAction } from '@/lib/auth/require-workspace';
 import { revalidatePath } from 'next/cache';
-import { getCurrentUser } from '@/lib/auth/session';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaTestCaseSheet } from '@/lib/mongodb/models/QaTestCaseSheet';
 import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
@@ -18,8 +18,9 @@ function loadOwnedSheet(userId: string, sheetId: string) {
 }
 
 export async function uploadTestCaseSheet(formData: FormData) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   const file = formData.get('file') as File | null;
   const sheetName = String(formData.get('sheetName') ?? '').trim();
@@ -79,8 +80,9 @@ export async function uploadTestCaseSheet(formData: FormData) {
 }
 
 export async function getTestCaseSheet(sheetId: string) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
   const sheet = await loadOwnedSheet(user.id, sheetId).lean();
@@ -96,8 +98,9 @@ export async function getTestCaseSheet(sheetId: string) {
  * into permanent history.
  */
 export async function updateSheetRows(sheetId: string, rows: unknown[]) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
   const sheet = await loadOwnedSheet(user.id, sheetId);
@@ -123,8 +126,9 @@ function bumpVersion(current: string): string {
 
 /** Explicitly promote the current working rows into permanent version history. */
 export async function saveAsNewVersion(sheetId: string, rows: unknown[], note: string) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
   const sheet = await loadOwnedSheet(user.id, sheetId);
@@ -156,8 +160,9 @@ export async function saveAsNewVersion(sheetId: string, rows: unknown[], note: s
 
 /** Point `currentVersionIndex` at an older snapshot — nothing is deleted. */
 export async function restoreSheetVersion(sheetId: string, versionIndex: number) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
   const sheet = await loadOwnedSheet(user.id, sheetId);
@@ -177,8 +182,9 @@ export async function restoreSheetVersion(sheetId: string, versionIndex: number)
 }
 
 export async function duplicateTestCaseSheet(sheetId: string) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
   const original = await loadOwnedSheet(user.id, sheetId).lean<any>();
@@ -203,8 +209,9 @@ export async function duplicateTestCaseSheet(sheetId: string) {
 }
 
 export async function deleteTestCaseSheet(sheetId: string) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
   const sheet = await loadOwnedSheet(user.id, sheetId);
@@ -222,8 +229,9 @@ export async function deleteTestCaseSheet(sheetId: string) {
 }
 
 export async function toggleSheetFavorite(sheetId: string) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
   const sheet = await loadOwnedSheet(user.id, sheetId);
