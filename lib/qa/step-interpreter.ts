@@ -52,6 +52,48 @@ function cleanTarget(raw: string): string {
     .trim();
 }
 
+/**
+ * The control a tap-style step names.
+ *
+ * When a sheet quotes a control, the quote IS the target and everything around
+ * it is prose. `cleanTarget` alone only strips quote characters, so
+ * `Tap the "Close" button on the advertisement.` became the target
+ * `Close on the advertisement.` — a label no app has, failing a step that was
+ * perfectly executable. Observed on a real run.
+ *
+ * Quoting control names is how sheets normally write them
+ * (`Tap "Start Your AI Journey" button`), and those only worked before because
+ * nothing followed the closing quote. Preferring the quoted literal makes the
+ * common form robust regardless of surrounding wording.
+ */
+function tapTarget(rest: string): string {
+  const quoted = extractPairedQuote(rest);
+  return quoted ? quoted.trim() : cleanTarget(rest);
+}
+
+/**
+ * A quoted span delimited by a MATCHING pair, tried widest-first.
+ *
+ * `extractQuoted` treats every quote character as interchangeable, so the
+ * apostrophe inside a label closed the span early: `Tap "Let's Create a Magic"
+ * button` yielded the target `Let`. That is a real label in this sheet, so the
+ * step could never match. Requiring the same delimiter on both ends keeps
+ * apostrophes inside the label where they belong, and double/smart quotes are
+ * tried before single ones so a bare apostrophe cannot win.
+ */
+function extractPairedQuote(text: string): string | null {
+  for (const [open, close] of [['"', '"'], ['“', '”'], ['‘', '’'], ["'", "'"]]) {
+    const re = new RegExp(`${escapeRe(open)}([^${escapeRe(close)}]+)${escapeRe(close)}`);
+    const m = text.match(re);
+    if (m && m[1].trim()) return m[1];
+  }
+  return null;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Test data like "email: a@b.com, password: secret" → the value for a named field. */
 export function valueFromTestData(testData: string, field: string): string | null {
   if (!testData || !field) return null;
@@ -247,10 +289,10 @@ export function interpretStep(rawStep: string, testData = ''): StepAction {
     return { kind: 'home', target: '', value: '', raw };
   }
   if (DOUBLETAP_RE.test(raw)) {
-    return { kind: 'doubletap', target: cleanTarget(strip(DOUBLETAP_RE)), value: '', raw };
+    return { kind: 'doubletap', target: tapTarget(strip(DOUBLETAP_RE)), value: '', raw };
   }
   if (LONGPRESS_RE.test(raw)) {
-    return { kind: 'longpress', target: cleanTarget(strip(LONGPRESS_RE)), value: '', raw };
+    return { kind: 'longpress', target: tapTarget(strip(LONGPRESS_RE)), value: '', raw };
   }
   if (NAVIGATE_RE.test(raw)) {
     const url = raw.match(/https?:\/\/\S+/)?.[0] ?? raw.match(/\s(\/[\w\-/]*)/)?.[1] ?? '';
@@ -303,7 +345,7 @@ export function interpretStep(rawStep: string, testData = ''): StepAction {
     return { kind: 'press', target: '', value: norm, raw };
   }
   if (CLICK_RE.test(raw)) {
-    return { kind: 'click', target: cleanTarget(strip(CLICK_RE)), value: '', raw };
+    return { kind: 'click', target: tapTarget(strip(CLICK_RE)), value: '', raw };
   }
   // Bare assertions with no leading verb: "Dashboard is displayed"
   if (/\b(?:is|are)\s+(?:displayed|visible|shown|present)\b/i.test(raw)) {
