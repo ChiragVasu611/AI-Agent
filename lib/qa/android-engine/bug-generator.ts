@@ -43,8 +43,15 @@ export class BugReporter {
   constructor(private ctx: BugContext) {}
 
   /**
-   * Files a finding as a bug. Returns the bug number, or null when the finding
-   * duplicates one already reported in this run.
+   * Files a finding as a bug. Returns the created document's **id**, or null
+   * when the finding duplicates one already reported in this run.
+   *
+   * The id — not the human-readable bug number — is what callers need: the
+   * result row's `bugId` is an ObjectId reference. Returning the number here
+   * made `QaTestCaseResult.create()` throw
+   * `Cast to ObjectId failed for value "BUG-27-001"`, which aborted the whole
+   * run on its FIRST failing check and discarded every result collected up to
+   * that point. The number is still available via {@link list} for display.
    */
   async report(f: Finding, screenshotDataUrl?: string | null): Promise<string | null> {
     const sig = signatureOf(f);
@@ -68,7 +75,7 @@ export class BugReporter {
       .join('\n\n')
       .slice(0, 12_000);
 
-    await QaBug.create({
+    const doc = await QaBug.create({
       userId: this.ctx.userId,
       projectId: this.ctx.projectId,
       runId: this.ctx.runId,
@@ -97,10 +104,10 @@ export class BugReporter {
     });
 
     this.created.push({ bugNumber, title: f.title, severity: f.severity, type: f.type });
-    return bugNumber;
+    return String((doc as unknown as { _id: unknown })._id);
   }
 
-  /** Files a batch, returning the numbers actually created. */
+  /** Files a batch, returning the ids actually created. */
   async reportAll(findings: Finding[], screenshotDataUrl?: string | null): Promise<string[]> {
     const out: string[] = [];
     for (const f of findings) {

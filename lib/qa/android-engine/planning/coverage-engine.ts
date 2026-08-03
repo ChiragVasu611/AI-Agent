@@ -52,7 +52,13 @@ export class CoverageEngine {
     const screensDiscovered = nodes.length;
     const screensExhausted = nodes.filter((n) => n.exhausted).length;
     const interactionsTried = nodes.reduce((s, n) => s + n.triedActions.size, 0);
-    const interactionsPending = nodes.reduce((s, n) => s + n.pendingActions.size, 0);
+    // Deferred (budget-parked) actions are untried work and must sit in the
+    // denominator — otherwise a screen whose long tail was parked reads as
+    // fully interacted-with, inflating overall coverage past the target and
+    // stopping the run on the strength of work that never happened.
+    const interactionsPending = nodes.reduce(
+      (s, n) => s + n.pendingActions.size + n.deferredActions.size, 0,
+    );
 
     const featuresDiscovered = features.featureCount();
     const featuresExercised = features.exercisedCount();

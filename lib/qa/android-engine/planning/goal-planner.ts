@@ -67,6 +67,9 @@ export class GoalPlanner {
   private active: GoalKind | null = null;
   private deprioritise: Set<GoalKind>;
   private boost: Set<GoalKind>;
+  /** Goals already given their one recovery pass — see recordProgress(). */
+  private readonly recoveryTried = new Set<GoalKind>();
+  private readonly recoveryQueue: GoalKind[] = [];
 
   constructor(opts: { deprioritise?: GoalKind[]; boost?: GoalKind[] } = {}) {
     this.deprioritise = new Set(opts.deprioritise ?? []);
@@ -115,7 +118,13 @@ export class GoalPlanner {
   /** Activates the goal matching the current screen and marks it reached. */
   onScreen(state: ScreenState): TestingGoal | null {
     const match = this.matchGoal(state);
-    if (!match) return null;
+    if (!match) {
+      // No goal owns this screen. Clear the active goal rather than leaving the
+      // previous one selected, so the next interaction's outcome is not credited
+      // to a goal the user never navigated to.
+      this.active = null;
+      return null;
+    }
     this.active = match.kind;
     if (match.status === 'pending' || match.status === 'paused') match.status = 'active';
     match.reached = true;
@@ -123,6 +132,21 @@ export class GoalPlanner {
     return match;
   }
 
+  /**
+   * Which goal the current screen belongs to.
+   *
+   * Screen KIND is authoritative when the classifier recognised one. Otherwise
+   * the screen's own controls are matched against goal vocabulary — and the
+   * candidate goals are tried in PRIORITY order, highest first.
+   *
+   * Both details matter. Matching used to run over every label on the screen
+   * (body copy included) in `Object.entries(GOAL_HINTS)` order, which is
+   * declaration order — so `onboarding` was tested first and any screen
+   * containing "next", "continue" or "done" was credited to onboarding, while
+   * anything with the word "open" or "view" fell to `content`. Goal progress was
+   * therefore attributed almost arbitrarily, and goals were marked satisfied by
+   * interactions that had nothing to do with them.
+   */
   private matchGoal(state: ScreenState): TestingGoal | undefined {
     const direct: Partial<Record<string, GoalKind>> = {
       login: 'login', signup: 'signup', settings: 'settings', profile: 'profile',
@@ -131,11 +155,25 @@ export class GoalPlanner {
     };
     const byKind = direct[state.kind];
     if (byKind && this.goals.has(byKind)) return this.goals.get(byKind);
-    const text = state.nodes.map((n) => labelOf(n)).join(' ').toLowerCase();
-    for (const [kind, re] of Object.entries(GOAL_HINTS)) {
-      if (re.test(text) && this.goals.has(kind as GoalKind)) return this.goals.get(kind as GoalKind);
+
+    // Only interactive controls and the screen's title carry goal meaning; a
+    // paragraph of marketing copy does not.
+    const controlText = state.nodes
+      .filter((n) => n.clickable || n.checkable || n.bounds.top < state.screenHeight * 0.15)
+      .map((n) => labelOf(n))
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    if (controlText) {
+      for (const g of this.orderedUnmet()) {
+        if (GOAL_HINTS[g.kind]?.test(controlText)) return g;
+      }
     }
-    return this.goals.get('content');
+
+    // No recognisable goal on this screen. Fall back to the broad content goal
+    // only when it is still unmet, so a satisfied goal is never re-credited.
+    const content = this.goals.get('content');
+    return content && content.status !== 'satisfied' ? content : undefined;
   }
 
   /**
@@ -158,10 +196,48 @@ export class GoalPlanner {
       g.status = 'satisfied';
       g.note = `Workflow exercised: reached + ${g.evidenceCount} navigating interaction(s).`;
     } else if (g.attempts >= MAX_BARREN_ATTEMPTS && g.evidenceCount === 0 && g.status === 'active') {
-      // Repeatedly active but never advanced — discard so effort goes elsewhere.
-      g.status = 'unreachable';
-      g.note = `Discarded after ${g.attempts} attempts with no progress.`;
+      // Repeatedly active but never advanced. Give it ONE recovery pass — the
+      // usual cause is a blocker (ad/paywall/pop-up) that has since been
+      // cleared, or a screen that needed a scroll to reveal its real controls —
+      // before writing the goal off, so a transient obstacle doesn't
+      // permanently cost the run a feature.
+      if (!this.recoveryTried.has(g.kind)) {
+        this.recoveryTried.add(g.kind);
+        g.status = 'pending';
+        g.attempts = 0;
+        g.note = `No progress in ${MAX_BARREN_ATTEMPTS} attempts — re-queued for one recovery pass.`;
+        this.recoveryQueue.push(g.kind);
+      } else {
+        g.status = 'unreachable';
+        g.note = `Unreachable: ${MAX_BARREN_ATTEMPTS} attempts before and after a recovery pass produced no navigation.`;
+      }
     }
+  }
+
+  /** Goals awaiting a recovery pass, drained by the caller for logging. */
+  drainRecoveryQueue(): GoalKind[] {
+    const out = [...this.recoveryQueue];
+    this.recoveryQueue.length = 0;
+    return out;
+  }
+
+  /**
+   * Per-goal verdict for the run report: what was reached, what wasn't, and the
+   * concrete reason why — so an incomplete run explains itself instead of just
+   * reporting a coverage percentage.
+   */
+  verdict(): Array<{ kind: GoalKind; label: string; status: TestingGoal['status']; reason: string }> {
+    return this.all().map((g) => ({
+      kind: g.kind,
+      label: g.label,
+      status: g.status,
+      reason: g.note
+        || (g.status === 'satisfied'
+          ? 'Workflow exercised with navigating evidence.'
+          : g.reached
+            ? `Screen reached but the workflow never advanced (${g.evidenceCount}/${g.evidenceTarget} evidence).`
+            : 'Never reached during this run — no screen matching the feature was discovered.'),
+    }));
   }
 
   markBlocked(kind: GoalKind, note: string): void {

@@ -165,6 +165,7 @@ export const KEY = {
   ENTER: 'KEYCODE_ENTER',
   APP_SWITCH: 'KEYCODE_APP_SWITCH',
   ESCAPE: 'KEYCODE_ESCAPE',
+  WAKEUP: 'KEYCODE_WAKEUP',
 } as const;
 
 export async function pressKey(serial: string, key: string): Promise<void> {
@@ -226,6 +227,45 @@ export async function isAppForeground(serial: string, pkg: string): Promise<bool
   return comp.startsWith(`${pkg}/`);
 }
 
+/**
+ * Screen/keyguard state. A device that dozes off mid-run (or was left locked)
+ * reports an empty or keyguard-only hierarchy, which otherwise looks identical
+ * to "the app rendered nothing" — the engine would keep dumping an asleep
+ * screen until the run's deadline. Recovery needs to tell these apart.
+ */
+export async function isScreenAwake(serial: string): Promise<boolean> {
+  const out = await shell(serial, 'dumpsys power', 15_000);
+  const m = /mWakefulness=(\w+)/.exec(out);
+  if (m) return /Awake/i.test(m[1]);
+  // Older builds only expose the display state.
+  const disp = await shell(serial, 'dumpsys display', 15_000);
+  return /mScreenState=ON|mState=ON/i.test(disp);
+}
+
+/** True when the lock screen is currently showing over everything else. */
+export async function isKeyguardLocked(serial: string): Promise<boolean> {
+  const out = await shell(serial, 'dumpsys window', 12_000);
+  if (/mDreamingLockscreen=true|isStatusBarKeyguard=true/i.test(out)) return true;
+  const km = await shell(serial, 'dumpsys keyguard', 10_000);
+  return /mShowing=true|showing=true/i.test(km);
+}
+
+/**
+ * Wakes the device and dismisses a non-secure keyguard so exploration can
+ * resume. A PIN/pattern-protected device cannot be unlocked without the
+ * credential, so this reports whether the screen actually became usable
+ * instead of pretending it succeeded.
+ */
+export async function wakeAndUnlock(serial: string, width = 1080, height = 1920): Promise<boolean> {
+  await pressKey(serial, KEY.WAKEUP);
+  if (await isKeyguardLocked(serial)) {
+    // Swipe up from the bottom — the gesture for a swipe-only keyguard.
+    const cx = Math.round(width / 2);
+    await swipe(serial, cx, Math.round(height * 0.85), cx, Math.round(height * 0.15), 300);
+  }
+  return (await isScreenAwake(serial)) && !(await isKeyguardLocked(serial));
+}
+
 // ------------------------------------------------------------- diagnostics
 
 export async function meminfo(serial: string, pkg: string): Promise<string> {
@@ -270,6 +310,42 @@ export async function clearLogcat(serial: string): Promise<void> {
 export async function dumpLogcat(serial: string): Promise<string> {
   const r = await runAdb(['-s', serial, 'logcat', '-d', '-v', 'threadtime'], 25_000);
   return r.ok ? r.stdout : '';
+}
+
+/**
+ * The device's active network transport, read from the platform. Returns null
+ * when it cannot be determined rather than guessing — the run report shows "—"
+ * instead of asserting a connection type that was never measured.
+ */
+export async function networkType(serial: string): Promise<string | null> {
+  const out = await shell(serial, 'dumpsys connectivity', 20_000);
+
+  // Read the transport of the CONNECTED network agent. Note that
+  // "Active default network: 101" is a network ID, not a type — matching that
+  // would report "101" as the connection type.
+  const nc = /\bTransports:\s*([A-Z_|&]+)/.exec(out);
+  if (nc) {
+    const first = nc[1].split(/[|&]/)[0].trim().toUpperCase();
+    if (first) return first === 'CELLULAR' ? 'MOBILE' : first;
+  }
+  // Older builds expose it as `ni{WIFI CONNECTED ...}`.
+  const ni = /\bni\{(\w+)\s+CONNECTED/i.exec(out);
+  if (ni) {
+    const t = ni[1].toUpperCase();
+    return t === 'CELLULAR' || t === 'MOBILE' ? 'MOBILE' : t;
+  }
+  return null;
+}
+
+/** Current display rotation as reported by the platform (0/90/180/270). */
+export async function displayRotation(serial: string): Promise<number | null> {
+  const out = await shell(serial, 'dumpsys input', 20_000);
+  const m = /SurfaceOrientation:\s*(\d)/.exec(out);
+  if (m) return Number(m[1]) * 90;
+  const win = await shell(serial, 'dumpsys window', 15_000);
+  const r = /mCurRotation=ROTATION_(\d+)|mRotation=(\d)/.exec(win);
+  if (r) return r[1] ? Number(r[1]) : Number(r[2]) * 90;
+  return null;
 }
 
 /** Network toggles. Guarded by the caller when adb itself runs over Wi-Fi. */

@@ -202,12 +202,22 @@ export function isInsideAdRegion(n: UiNode, regions: Bounds[]): boolean {
   return regions.some((r) => c.x >= r.left && c.x <= r.right && c.y >= r.top && c.y <= r.bottom);
 }
 
-/** Ranks candidate dismiss controls found in the live hierarchy. */
-function findDismissControls(nodes: UiNode[], w: number, h: number): UiNode[] {
+/**
+ * Ranks candidate dismiss controls found in the live hierarchy.
+ *
+ * `withinRegions` constrains candidates to controls that sit geometrically
+ * inside an ad container. That matters for an ad merely OVERLAID on a usable
+ * screen: the app's own chrome routinely offers "Close", "Cancel" or "Skip"
+ * buttons, and tapping one of those believing it closes the ad would navigate
+ * the app and corrupt the flow under test. A full-screen interstitial owns the
+ * window, so there is nothing else to confuse and no constraint is needed.
+ */
+function findDismissControls(nodes: UiNode[], w: number, h: number, withinRegions?: Bounds[]): UiNode[] {
   const scored: Array<{ n: UiNode; score: number }> = [];
 
   for (const n of nodes) {
     if (!n.enabled) continue;
+    if (withinRegions && withinRegions.length > 0 && !isInsideAdRegion(n, withinRegions)) continue;
     const label = labelOf(n);
     const id = n.resourceId;
     let score = 0;
@@ -215,12 +225,15 @@ function findDismissControls(nodes: UiNode[], w: number, h: number): UiNode[] {
     if (DISMISS_LABELS.test(label)) score += 6;
     else if (DISMISS_LOOSE.test(label)) score += 4;
     if (DISMISS_ID.test(id)) score += 5;
-    if (/ImageButton|ImageView/i.test(n.className) && !label && n.clickable) {
-      // Unlabeled icon button in a corner is the classic close affordance.
+    if (/ImageButton|ImageView|View/i.test(n.className) && !label && n.clickable) {
+      // Unlabeled icon button in a top corner is the classic close affordance.
+      // The vertical band covers the top 30%, not 20%: measured on a real device,
+      // ad and paywall close buttons sit below the status bar and the creative's
+      // own padding (one was 22.6% down), so a tighter band missed them entirely.
       const c = centerOf(n.bounds);
-      const inTopCorner = c.y < h * 0.2 && (c.x < w * 0.2 || c.x > w * 0.8);
+      const inTopCorner = c.y < h * 0.3 && (c.x < w * 0.25 || c.x > w * 0.75);
       const small = bw(n.bounds) < w * 0.25 && bh(n.bounds) < h * 0.12;
-      if (inTopCorner && small) score += 3;
+      if (inTopCorner && small) score += 4;
     }
     if (!n.clickable) score -= 2;
 
@@ -234,11 +247,28 @@ function findDismissControls(nodes: UiNode[], w: number, h: number): UiNode[] {
  * True when the hierarchy still shows a BLOCKING ad. An inline banner left on
  * the screen does not count as "still blocked" — otherwise dismissal would
  * loop forever on a screen that is perfectly usable.
+ *
+ * The resolved activity must be passed in: an ad SDK's own activity is the
+ * strongest blocking signal there is, and omitting it (as this used to) made a
+ * still-displayed interstitial read as successfully dismissed whenever its
+ * hierarchy carried no other ad signature.
  */
-function stillAd(xml: string, appPackage: string, w: number, h: number): boolean {
+function stillAd(xml: string, activity: string, appPackage: string, w: number, h: number): boolean {
   const { nodes } = parseHierarchy(xml);
-  const activityGuess = '';
-  return detectAd(nodes, activityGuess, appPackage, w, h).blocking;
+  return detectAd(nodes, activity, appPackage, w, h).blocking;
+}
+
+/**
+ * Whether a usable dismiss affordance exists right now. Lets callers close an
+ * ad that is merely overlaid (a banner or a partial native ad) when a close
+ * control is genuinely present, without paying the countdown wait an
+ * interstitial needs.
+ */
+export function hasDismissControl(
+  nodes: UiNode[], w: number, h: number, opts: { withinAdOnly?: boolean } = {},
+): boolean {
+  const regions = opts.withinAdOnly ? adRegions(nodes) : undefined;
+  return findDismissControls(nodes, w, h, regions).length > 0;
 }
 
 export interface AdDismissResult {
@@ -258,18 +288,25 @@ export async function dismissAd(
   w: number,
   h: number,
   maxWaitMs = 30_000,
+  opts: { allowBack?: boolean; withinAdOnly?: boolean } = {},
 ): Promise<AdDismissResult> {
   const attempts: string[] = [];
   const started = Date.now();
+  const allowBack = opts.allowBack ?? true;
+  /** Constrain taps to the ad's own container — see findDismissControls(). */
+  const scoped = opts.withinAdOnly ?? false;
+  const regionsFor = (ns: UiNode[]): Bounds[] | undefined => (scoped ? adRegions(ns) : undefined);
 
   // Wait — adaptively — for a dismiss control to exist. Rewarded/interstitial
   // ads gate the close button behind a countdown; we poll the real hierarchy
-  // rather than guessing how long that countdown is.
+  // rather than guessing how long that countdown is. A control that is already
+  // present returns on the first poll, so this costs nothing when the ad is
+  // immediately closable.
   const appeared = await waitUntil(
     serial,
     (xml) => {
       const { nodes } = parseHierarchy(xml);
-      return findDismissControls(nodes, w, h).length > 0;
+      return findDismissControls(nodes, w, h, regionsFor(nodes)).length > 0;
     },
     maxWaitMs,
   );
@@ -278,26 +315,38 @@ export async function dismissAd(
   // Try each candidate control, best-ranked first.
   const xml = await dumpHierarchy(serial);
   const { nodes } = parseHierarchy(xml);
-  const candidates = findDismissControls(nodes, w, h);
+  const candidates = findDismissControls(nodes, w, h, regionsFor(nodes));
 
   for (const c of candidates.slice(0, 4)) {
     const p = centerOf(c.bounds);
     await tap(serial, p.x, p.y);
     attempts.push(`tapped "${labelOf(c) || c.resourceId || c.className}"`);
-    await waitForStableUi(serial, { timeoutMs: 3_500 });
-    const after = await dumpHierarchy(serial);
-    if (after && !stillAd(after, appPackage, w, h)) {
+    const settled = await waitForStableUi(serial, { timeoutMs: 3_500 });
+    const after = settled.xml || (await dumpHierarchy(serial));
+    if (after && !stillAd(after, settled.activity, appPackage, w, h)) {
       return { dismissed: true, attempts, waitedMs: Date.now() - started };
     }
   }
 
   // System Back is the universal escape hatch — but it can also back out of the
-  // app entirely. Press it ONCE, then make sure we're still in the app under
-  // test; if Back exited to the launcher, relaunch so the run continues instead
-  // of stranding the agent on the home screen.
+  // app entirely. Callers handling a merely-overlaid ad opt out of it, because
+  // BACK on a usable screen navigates the app instead of closing anything.
+  if (!allowBack) {
+    const settled = await waitForStableUi(serial, { timeoutMs: 2_000 });
+    const after = settled.xml || (await dumpHierarchy(serial));
+    return {
+      dismissed: !after || !stillAd(after, settled.activity, appPackage, w, h),
+      attempts,
+      waitedMs: Date.now() - started,
+    };
+  }
+
+  // Press it ONCE, then make sure we're still in the app under test; if Back
+  // exited to the launcher, relaunch so the run continues instead of stranding
+  // the agent on the home screen.
   await pressKey(serial, KEY.BACK);
   attempts.push('pressed BACK');
-  await waitForStableUi(serial, { timeoutMs: 3_500 });
+  const settledBack = await waitForStableUi(serial, { timeoutMs: 3_500 });
 
   if (!(await isAppForeground(serial, appPackage))) {
     attempts.push('BACK exited the app — relaunching');
@@ -307,8 +356,8 @@ export async function dismissAd(
     return { dismissed: relaunch.ok, attempts, waitedMs: Date.now() - started };
   }
 
-  const after = await dumpHierarchy(serial);
-  const dismissed = !after || !stillAd(after, appPackage, w, h);
+  const after = settledBack.xml || (await dumpHierarchy(serial));
+  const dismissed = !after || !stillAd(after, settledBack.activity, appPackage, w, h);
 
   return { dismissed, attempts, waitedMs: Date.now() - started };
 }

@@ -8,7 +8,42 @@ import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
 import { QaTestCaseResult } from '@/lib/mongodb/models/QaTestCaseResult';
 import { sleep, log } from '@/lib/qa/runtime-helpers';
 import { onRunCompleted } from '@/lib/issue-boards/sync';
+import { evidenceKey, getEvidenceStore, pngSize } from '@/lib/qa/evidence/store';
 import type { QaBugType, QaSeverity } from '@/lib/types';
+
+/**
+ * Persists a page frame to the evidence store, keeping only metadata in Mongo.
+ * Falls back to an inline payload if the store is unavailable — a real captured
+ * frame is never discarded just because storage misbehaved.
+ */
+async function storePageFrame(runId: string, url: string, buf: Buffer): Promise<void> {
+  const { randomUUID } = await import('crypto');
+  try {
+    const store = await getEvidenceStore();
+    const key = evidenceKey(runId, 'screenshot', `${Date.now()}-${randomUUID()}.png`);
+    const stored = await store.put(key, buf, 'image/png');
+    const size = pngSize(buf);
+    await QaScreenshot.create({
+      runId,
+      screenName: url,
+      testStep: 'Page load',
+      storageKey: stored.key,
+      contentType: stored.contentType,
+      bytes: stored.bytes,
+      sha256: stored.sha256,
+      width: size?.width ?? null,
+      height: size?.height ?? null,
+      imageDataUrl: null,
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('QA evidence store write failed; storing frame inline', (e as Error)?.message);
+    await QaScreenshot.create({
+      runId, screenName: url, testStep: 'Page load',
+      imageDataUrl: `data:image/png;base64,${buf.toString('base64')}`,
+    });
+  }
+}
 
 const NAV_TIMEOUT_MS = 25000;
 const MAX_PAGES = 12;
@@ -554,8 +589,10 @@ export async function runWebTestExecution(runId: string) {
       let screenshotDataUrl: string | null = null;
       try {
         const buf = await page.screenshot({ type: 'png' });
+        // Bugs embed their own evidence image, so the data URL is still produced
+        // for that; the gallery frame itself goes to the evidence store.
         screenshotDataUrl = `data:image/png;base64,${buf.toString('base64')}`;
-        await QaScreenshot.create({ runId, screenName: url, testStep: 'Page load', imageDataUrl: screenshotDataUrl });
+        await storePageFrame(runId, url, buf);
       } catch {
         await log(runId, 'automation', 'warn', `Could not capture a screenshot for ${url}.`);
       }
@@ -645,19 +682,41 @@ export async function runWebTestExecution(runId: string) {
 
   const criticalOrHigh = severityCounts.critical + severityCounts.high;
   const avgLoadMs = loadTimes.length > 0 ? loadTimes.reduce((a, b) => a + b, 0) / loadTimes.length : 0;
-  const performanceScore = Math.max(20, Math.round(100 - Math.min(70, avgLoadMs / 60) - criticalOrHigh * 8));
 
-  run.status = criticalOrHigh > 0 ? 'failed' : failedCases > 0 ? 'partial' : 'passed';
+  // Did the run actually exercise the site? A target that never loaded produces
+  // no checks and therefore no bugs, and "no bugs" must never be reported as a
+  // pass — that is indistinguishable from a genuinely clean run.
+  const exercised = visited.size > 0 && totalCases > 0;
+
+  // A score is only computed from real measurements. With no page loads there is
+  // no latency to score, and a formula fed zeros would publish a perfect 100.
+  const performanceScore = exercised && loadTimes.length > 0
+    ? Math.max(20, Math.round(100 - Math.min(70, avgLoadMs / 60) - criticalOrHigh * 8))
+    : null;
+
+  run.status = !exercised
+    ? 'failed'
+    : criticalOrHigh > 0 ? 'failed' : failedCases > 0 ? 'partial' : 'passed';
   run.progress = 100;
-  run.currentStep = 'Completed';
+  run.currentStep = exercised ? 'Completed' : 'Could not test the site';
   run.currentCase = null;
   run.totalCases = totalCases;
   run.passedCases = passedCases;
   run.failedCases = failedCases;
   run.performanceScore = performanceScore;
+  if (!exercised) {
+    run.errorMessage =
+      `Run did not exercise the site: ${visited.size} page(s) loaded and ${totalCases} check(s) executed. `
+      + 'No result is reported because nothing was measured.';
+  }
   run.completedAt = new Date();
   await run.save();
 
-  await log(runId, 'automation', 'info', `Run completed: ${run.status.toUpperCase()} — ${passedCases}/${totalCases} checks passed across ${visited.size} page(s), avg load ${Math.round(avgLoadMs)}ms.`);
+  if (!exercised) {
+    await log(runId, 'error', 'error', `RUN NOT VALID — ${run.errorMessage}`);
+  }
+  await log(runId, 'automation', 'info',
+    `Run completed: ${run.status.toUpperCase()} — ${passedCases}/${totalCases} checks passed across ${visited.size} page(s)`
+    + `${loadTimes.length > 0 ? `, avg load ${Math.round(avgLoadMs)}ms` : ', no page load timing captured'}.`);
   await onRunCompleted(runId);
 }

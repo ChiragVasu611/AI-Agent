@@ -8,18 +8,19 @@ import { DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
 import { installApk, clearAppData, isPackageInstalled } from '@/lib/qa/adb';
 import type { QaCredentials } from './login-handler';
 
-import { profileDevice, forceStop, startAppTimed } from './device';
+import { profileDevice, forceStop, startAppTimed, networkType, displayRotation, cpuinfo } from './device';
 import { ScreenshotManager } from './screenshots';
 import { CrashMonitor } from './crash-monitor';
 import { BugReporter } from './bug-generator';
 import { explore, observeScreen } from './explorer';
 import { sampleMemory } from './memory';
+import { parseCpuinfo } from './performance';
 import { sampleBattery } from './battery';
 import {
   ModulePlan, runPerScreenModules, runPostModules, runMonkeyModule,
   runCompatibilityModule, runAiExploratory, resetCheckSequence, type PostRunContext,
 } from './module-runner';
-import { persistOutcomes, computeStatus, computePerformanceScore } from './report';
+import { persistOutcomes, computeStatus, computePerformanceScore, assessExercise } from './report';
 import {
   PlanningSession, KnowledgeBase, CoverageEngine,
   newLedger, assessModules, completeCount, type EvidenceLedger,
@@ -92,9 +93,24 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
 
   const profile = await profileDevice(serial);
   run.currentDevice = `${profile.model} · ${profile.osVersion}`;
+  // Real hardware facts, read from the device — the report renders these rather
+  // than any fixed placeholder, so what it shows is always what was measured.
+  run.deviceInfo = {
+    ...(run.deviceInfo ?? {}),
+    model: profile.model,
+    osVersion: profile.osVersion,
+    sdkInt: profile.sdkInt || null,
+    widthPx: profile.width,
+    heightPx: profile.height,
+    densityDpi: profile.densityDpi,
+    platform: 'android',
+  };
   await run.save();
 
   await emit('info', `Real-device run for "${appName}" on ${profile.model} (${profile.osVersion}).`);
+  await emit('info',
+    `Device: ${profile.width}x${profile.height} @ ${profile.densityDpi}dpi, API ${profile.sdkInt || 'unknown'}`
+    + `${profile.wireless ? ', connected over Wi-Fi' : ', connected over USB'}.`);
   await emit('info', `Selected modules: ${plan.list().join(', ') || '(default smoke set)'}`);
 
   const fail = async (message: string) => {
@@ -234,6 +250,20 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
   await forceStop(serial, packageName);
 
   const batteryStart = await sampleBattery(serial);
+  // Live device state, all read from the platform. Anything the device does not
+  // report stays null and the report shows "—" for it.
+  const [netType, rotation] = await Promise.all([
+    networkType(serial).catch(() => null),
+    displayRotation(serial).catch(() => null),
+  ]);
+  run.deviceInfo = {
+    ...(run.deviceInfo ?? {}),
+    batteryPct: batteryStart.levelPct,
+    batteryTempC: batteryStart.temperatureC,
+    charging: batteryStart.charging,
+    networkType: netType,
+    rotationDegrees: rotation,
+  };
   run.currentStep = 'Launching app';
   run.progress = 10;
   await run.save();
@@ -324,8 +354,41 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
     },
   });
 
-  await emit('info', `Exploration finished (${exploration.terminationReason}): ${exploration.graph.size} screen(s), ${exploration.steps} interaction(s), ${exploration.adsDismissed} ad(s) dismissed, ${exploration.permissionsHandled} permission(s) handled.`);
+  await emit('info',
+    `Exploration finished (${exploration.terminationReason}): ${exploration.terminationDetail}`);
+  await emit('info',
+    `Navigation: ${exploration.graph.size} screen(s), ${exploration.steps} interaction(s)`
+    + `${exploration.graph.deferredCount() > 0 ? `, ${exploration.graph.deferredCount()} action(s) still deferred` : ''}.`);
+  await emit('info',
+    `Interruptions: ${exploration.adsDismissed} ad(s), ${exploration.paywallsDismissed} paywall(s), `
+    + `${exploration.popupsDismissed} pop-up(s), ${exploration.permissionsHandled} permission prompt(s) handled `
+    + `across ${exploration.interruptionsCleared} chain(s) — ${Math.round(exploration.interruptionMs / 1000)}s total.`);
+  await emit('info',
+    `Recovery: ${exploration.recoveries} recovery action(s), ${exploration.resumes} flow(s) resumed after an interruption.`);
   await emit('debug', exploration.graph.summary());
+
+  // ------------------------------------------------- GOAL VERDICT (per feature)
+  // The run states plainly which application goals were actually reached and, for
+  // every goal that was not, the concrete reason — so an incomplete run explains
+  // itself instead of leaving a coverage percentage to be interpreted.
+  const goalVerdict = planner.goals.verdict();
+  const reached = goalVerdict.filter((g) => g.status === 'satisfied');
+  const missed = goalVerdict.filter((g) => g.status !== 'satisfied' && g.status !== 'unreachable');
+  const unreachable = goalVerdict.filter((g) => g.status === 'unreachable');
+  await emit('info', `Goal verdict: ${reached.length}/${goalVerdict.length} application goal(s) reached.`);
+  for (const g of reached) await emit('info', `  ✓ ${g.label} — ${g.reason}`);
+  for (const g of missed) await emit('warn', `  • ${g.label} NOT reached — ${g.reason}`);
+  for (const g of unreachable) await emit('warn', `  ✗ ${g.label} unreachable — ${g.reason}`);
+  if (missed.length > 0 || unreachable.length > 0) {
+    // A screenshot of where the run actually ended makes an unreached goal
+    // diagnosable instead of just asserted.
+    await screenshots.capture({
+      runId,
+      screenName: primaryScreen,
+      reason: 'failure',
+      step: `run ended with ${missed.length + unreachable.length} goal(s) unreached (${exploration.terminationReason})`,
+    });
+  }
 
   // Stop requested during exploration — finalize as cancelled and exit.
   if (exploration.terminationReason === 'cancelled') {
@@ -355,6 +418,30 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
     log: emit,
   };
   const post = await runPostModules(plan, postCtx);
+
+  // Refresh the device snapshot with values measured AFTER the app was exercised
+  // — memory in use, CPU attributed to the app, and battery drawn over the run.
+  // These are direct dumpsys reads, and any that the device withholds stay null.
+  try {
+    const [memNow, batNow, cpuNow] = await Promise.all([
+      sampleMemory(serial, packageName).catch(() => null),
+      sampleBattery(serial).catch(() => null),
+      cpuinfo(serial).then((out) => parseCpuinfo(out, packageName)).catch(() => null),
+    ]);
+    run.deviceInfo = {
+      ...(run.deviceInfo ?? {}),
+      memoryPssKb: memNow?.totalPssKb ?? run.deviceInfo?.memoryPssKb ?? null,
+      cpuAppPct: cpuNow?.appPct ?? run.deviceInfo?.cpuAppPct ?? null,
+      batteryPct: batNow?.levelPct ?? run.deviceInfo?.batteryPct ?? null,
+      batteryTempC: batNow?.temperatureC ?? run.deviceInfo?.batteryTempC ?? null,
+      charging: batNow?.charging ?? run.deviceInfo?.charging ?? null,
+    };
+    await run.save();
+    await emit('info',
+      `Device state after exercising the app: memory ${memNow?.totalPssKb != null ? `${(memNow.totalPssKb / 1024).toFixed(1)} MB PSS` : 'not reported'}, `
+      + `CPU ${cpuNow?.appPct != null ? `${cpuNow.appPct}%` : 'not reported'}, `
+      + `battery ${batNow?.levelPct != null ? `${batNow.levelPct}%` : 'not reported'}.`);
+  } catch { /* metrics are reported when available; never fail a run over them */ }
 
   // Stop requested after the measurement phase — save what we have and exit
   // before the long-running stress/compatibility modules.
@@ -543,21 +630,53 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
 
   // -------------------------------------------------------------- VERDICT
   const severityCounts = reporter.severityCounts;
-  run.status = computeStatus(severityCounts, reporter.count);
+
+  // Did the run actually drive the app? A run that never got past the launch
+  // screen finds no bugs, and "no bugs" must NOT be reported as a pass — that
+  // reads identically to a genuinely clean run and hides the fact that nothing
+  // was tested at all.
+  const navigatingTransitions = exploration.graph.allEdges().filter((e) => e.navigated).length;
+  const exercise = assessExercise({
+    screensVisited: exploration.graph.size,
+    interactions: exploration.steps,
+    navigatingTransitions,
+    goalsReached: reached.length,
+  });
+
+  run.status = exercise.exercised ? computeStatus(severityCounts, reporter.count) : 'failed';
   run.progress = 100;
-  run.currentStep = 'Completed';
+  run.currentStep = exercise.exercised ? 'Completed' : 'Could not test the app';
   run.currentCase = null;
   run.totalCases = totals.total;
   run.passedCases = totals.passed;
   run.failedCases = totals.failed;
-  run.performanceScore = computePerformanceScore(severityCounts);
+  // A score computed only from bug counts would read 100/100 for a run that
+  // tested nothing; leave it unset instead of publishing a meaningless figure.
+  run.performanceScore = exercise.exercised ? computePerformanceScore(severityCounts) : null;
+  if (!exercise.exercised) {
+    run.errorMessage = `Run did not exercise the app: ${exercise.reason}`;
+  }
   run.completedAt = new Date();
   await run.save();
+
+  if (!exercise.exercised) {
+    await emit('error', `RUN NOT VALID — ${exercise.reason}`);
+    await emit('error',
+      `Diagnosis: exploration ended because ${exploration.terminationDetail.replace(/\.$/, '')}. `
+      + 'The checks recorded below describe only the launch screen and must not be read as app coverage.');
+  }
+  if (totals.skipped > 0) {
+    await emit('warn', `${totals.skipped} result row(s) could not be stored and were skipped.`);
+  }
 
   await emit('info',
     `Run completed: ${run.status.toUpperCase()} — ${totals.passed}/${totals.total} checks passed, `
     + `${reporter.count} bug(s) [crit ${severityCounts.critical}, high ${severityCounts.high}, med ${severityCounts.medium}, low ${severityCounts.low}], `
-    + `${screenshots.stats.captured} real screenshot(s), ${exploration.graph.size} screen(s) explored.`);
+    + `${screenshots.stats.captured} real screenshot(s), ${exploration.graph.size} screen(s) explored, `
+    + `${navigatingTransitions} navigating transition(s).`);
+  await emit('info',
+    `Final outcome: ${reached.length}/${goalVerdict.length} application goal(s) reached; `
+    + `ended because ${exploration.terminationDetail.replace(/\.$/, '')}.`);
   await onRunCompleted(runId);
 
   } catch (err) {
@@ -565,6 +684,14 @@ export async function runAndroidDeviceExecution(runId: string, serial: string): 
     // terminal state — otherwise it polls "running" forever.
     const message = err instanceof Error ? err.message : String(err);
     try { await emit('error', `Run aborted: ${message.slice(0, 300)}`); } catch { /* ignore */ }
+    // Capture what the device was showing when it failed — an unexpected abort
+    // is exactly the case where a screenshot is worth most, and the run used to
+    // record nothing at all.
+    try {
+      await new ScreenshotManager(serial).capture({
+        runId, screenName: 'Run aborted', reason: 'failure', step: message.slice(0, 120),
+      });
+    } catch { /* the device may be gone; never mask the original failure */ }
     try {
       const fresh = await QaTestRun.findById(runId);
       if (fresh && fresh.status !== 'passed' && fresh.status !== 'partial') {

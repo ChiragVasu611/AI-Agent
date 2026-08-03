@@ -5,13 +5,35 @@ const qaTestRunSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   projectId: { type: Schema.Types.ObjectId, ref: 'QaProject', required: true, index: true },
   modules: { type: [String], default: [] },
-  status: { type: String, enum: ['queued', 'running', 'passed', 'failed', 'partial', 'cancelled'], default: 'queued', index: true },
+  /**
+   * `blocked` means the target was never executed — no runtime was available, the
+   * platform has no driver for it, or a host dependency was missing. It is a
+   * distinct outcome from `failed` (which means the app WAS executed and misbehaved)
+   * precisely so a run that tested nothing can never be read as a result.
+   */
+  status: { type: String, enum: ['queued', 'running', 'passed', 'failed', 'partial', 'cancelled', 'blocked'], default: 'queued', index: true },
   progress: { type: Number, default: 0 },
   sourceMode: { type: String, enum: ['catalog', 'uploaded'], default: 'catalog' },
   // 'blocked_no_runtime' = the artifact type has no executor attached (e.g. an
   // APK with no Appium/device farm), so the run reported BLOCKED instead of
   // inventing pass/fail results.
-  engineMode: { type: String, enum: ['real_browser', 'real_device', 'simulated', 'blocked_no_runtime'], default: 'simulated' },
+  /**
+   * Which real engine executed the run, or why none did.
+   *
+   * `simulated` is retained ONLY so historical runs recorded before the simulated
+   * engine was removed still deserialise. Nothing writes it any more — a target
+   * that cannot be executed is now recorded as one of the three blocked modes,
+   * with the reason on `errorMessage`.
+   */
+  engineMode: {
+    type: String,
+    enum: [
+      'real_browser', 'real_device',
+      'blocked_no_runtime', 'unsupported_platform', 'runtime_unavailable',
+      'simulated',
+    ],
+    default: 'blocked_no_runtime',
+  },
   // Serial of the device chosen on QA → Devices. A preference, not a hard
   // requirement: if it is no longer attached the engine falls back to any
   // authorized device and says so in the run log.
@@ -48,6 +70,33 @@ const qaTestRunSchema = new Schema({
 
   performanceScore: { type: Number, default: null },
   errorMessage: { type: String, default: null },
+
+  /**
+   * Real, measured properties of the device (or browser) the run executed on.
+   *
+   * Every field is null until the engine actually reads it off the target, and
+   * the report renders "—" for a null. Nothing here is a placeholder: the run
+   * monitor previously displayed a fixed Battery 78% / CPU 34% / 512 MB /
+   * 1080x2400 regardless of the hardware, which misrepresented an unmeasured
+   * value as a measurement (and reported the wrong resolution for most phones).
+   */
+  deviceInfo: {
+    model: { type: String, default: null },
+    osVersion: { type: String, default: null },
+    sdkInt: { type: Number, default: null },
+    widthPx: { type: Number, default: null },
+    heightPx: { type: Number, default: null },
+    densityDpi: { type: Number, default: null },
+    batteryPct: { type: Number, default: null },
+    batteryTempC: { type: Number, default: null },
+    charging: { type: Boolean, default: null },
+    memoryPssKb: { type: Number, default: null },
+    cpuAppPct: { type: Number, default: null },
+    networkType: { type: String, default: null },
+    rotationDegrees: { type: Number, default: null },
+    /** Which platform surface produced the numbers, for honest labelling. */
+    platform: { type: String, default: null },
+  },
 
   /**
    * Opt-in for `pm clear` before an installed-app run. Defaults to FALSE because

@@ -20,6 +20,13 @@ export interface GraphNode {
   triedActions: Set<string>;
   /** Interaction keys discovered but not yet executed. */
   pendingActions: Set<string>;
+  /**
+   * Actions parked because this screen's per-visit budget was spent — NOT
+   * executed and NOT discarded. They are restored when the agent comes back
+   * with budget to spend, so a busy screen can't monopolise a run while still
+   * keeping its long tail of controls reachable.
+   */
+  deferredActions: Set<string>;
   /** True once every discovered action has been tried. */
   exhausted: boolean;
 }
@@ -50,17 +57,19 @@ export class ScreenGraph {
         visitCount: 0,
         triedActions: new Set(),
         pendingActions: new Set(),
+        deferredActions: new Set(),
         exhausted: false,
       };
       this.nodes.set(state.signature, node);
     }
     node.visitCount += 1;
 
-    // Merge newly discovered actions that haven't already been executed.
+    // Merge newly discovered actions that haven't already been executed. An
+    // action parked on a previous visit stays parked until it is restored.
     for (const key of discoveredActions) {
-      if (!node.triedActions.has(key)) node.pendingActions.add(key);
+      if (!node.triedActions.has(key) && !node.deferredActions.has(key)) node.pendingActions.add(key);
     }
-    node.exhausted = node.pendingActions.size === 0;
+    node.exhausted = node.pendingActions.size === 0 && node.deferredActions.size === 0;
     return node;
   }
 
@@ -68,8 +77,50 @@ export class ScreenGraph {
     const node = this.nodes.get(signature);
     if (!node) return;
     node.pendingActions.delete(actionKey);
+    node.deferredActions.delete(actionKey);
     node.triedActions.add(actionKey);
+    node.exhausted = node.pendingActions.size === 0 && node.deferredActions.size === 0;
+  }
+
+  /**
+   * Parks an action for a later visit instead of executing or discarding it.
+   *
+   * The per-screen budget used to call {@link markTried} on everything it could
+   * not afford, which recorded untried actions as tried: the screen went
+   * `exhausted`, the frontier emptied, and the planner concluded the whole run
+   * was finished while most of the app had never been touched.
+   */
+  defer(signature: string, actionKey: string): void {
+    const node = this.nodes.get(signature);
+    if (!node) return;
+    if (node.triedActions.has(actionKey)) return;
+    node.pendingActions.delete(actionKey);
+    node.deferredActions.add(actionKey);
+    // Still work outstanding here, so the node is NOT exhausted.
+    node.exhausted = false;
+  }
+
+  /** Brings a screen's parked actions back into play. Returns how many. */
+  restoreDeferred(signature: string): number {
+    const node = this.nodes.get(signature);
+    if (!node || node.deferredActions.size === 0) return 0;
+    let restored = 0;
+    for (const key of Array.from(node.deferredActions)) {
+      node.deferredActions.delete(key);
+      if (!node.triedActions.has(key)) { node.pendingActions.add(key); restored += 1; }
+    }
     node.exhausted = node.pendingActions.size === 0;
+    return restored;
+  }
+
+  /** Screens holding parked actions — real remaining work, off the frontier. */
+  deferredFrontier(): GraphNode[] {
+    return Array.from(this.nodes.values()).filter((n) => n.deferredActions.size > 0);
+  }
+
+  /** Total parked actions across every screen. */
+  deferredCount(): number {
+    return Array.from(this.nodes.values()).reduce((s, n) => s + n.deferredActions.size, 0);
   }
 
   addEdge(from: string, to: string, action: string, navigated: boolean): void {
@@ -106,10 +157,37 @@ export class ScreenGraph {
   }
 
   /**
-   * Breadth-first path of actions from `from` to any screen with pending work.
-   * Used to navigate back to unexplored territory instead of restarting.
+   * Shortest recorded route of actions between two known screens, over edges
+   * that actually navigated. Returns null when no route was ever observed —
+   * the caller then falls back to BACK rather than guessing.
    */
-  pathToFrontier(from: string): string[] | null {
+  pathBetween(from: string, to: string): string[] | null {
+    if (from === to) return [];
+    if (!this.nodes.has(from) || !this.nodes.has(to)) return null;
+
+    const queue: Array<{ sig: string; path: string[] }> = [{ sig: from, path: [] }];
+    const seen = new Set<string>([from]);
+
+    while (queue.length > 0) {
+      const { sig, path } = queue.shift()!;
+      if (path.length > 8) continue; // long replays diverge; keep them short
+      for (const e of this.edges) {
+        if (e.from !== sig || !e.navigated || seen.has(e.to)) continue;
+        const next = [...path, e.action];
+        if (e.to === to) return next;
+        seen.add(e.to);
+        queue.push({ sig: e.to, path: next });
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Nearest screen that still has outstanding work — pending OR deferred — and
+   * the route to it. This is what lets the explorer navigate deliberately toward
+   * remaining work instead of pressing BACK and hoping.
+   */
+  pathToWork(from: string): { target: string; path: string[] } | null {
     if (!this.nodes.has(from)) return null;
     const queue: Array<{ sig: string; path: string[] }> = [{ sig: from, path: [] }];
     const seen = new Set<string>([from]);
@@ -117,8 +195,9 @@ export class ScreenGraph {
     while (queue.length > 0) {
       const { sig, path } = queue.shift()!;
       const node = this.nodes.get(sig);
-      if (node && node.pendingActions.size > 0 && path.length > 0) return path;
-      if (path.length > 6) continue; // keep replay paths short and reliable
+      const hasWork = node && (node.pendingActions.size > 0 || node.deferredActions.size > 0);
+      if (hasWork && path.length > 0) return { target: sig, path };
+      if (path.length > 8) continue;
 
       for (const e of this.edges) {
         if (e.from !== sig || !e.navigated || seen.has(e.to)) continue;
@@ -135,7 +214,8 @@ export class ScreenGraph {
     lines.push(`Screens discovered: ${this.nodes.size}`);
     for (const n of Array.from(this.nodes.values())) {
       lines.push(
-        `  • ${n.label} [${n.kind}] — visits: ${n.visitCount}, actions tried: ${n.triedActions.size}, pending: ${n.pendingActions.size}`,
+        `  • ${n.label} [${n.kind}] — visits: ${n.visitCount}, actions tried: ${n.triedActions.size}, `
+        + `pending: ${n.pendingActions.size}${n.deferredActions.size ? `, deferred: ${n.deferredActions.size}` : ''}`,
       );
     }
     const navigated = this.edges.filter((e) => e.navigated).length;

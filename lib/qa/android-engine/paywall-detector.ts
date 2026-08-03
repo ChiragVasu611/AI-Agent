@@ -1,7 +1,7 @@
 import type { UiNode } from './types';
 import { centerOf, labelOf, visibleText, area, parseHierarchy } from './ui-parser';
 import { dumpHierarchy, tap, pressKey, KEY, swipe } from './device';
-import { waitForStableUi } from './smart-wait';
+import { waitForStableUi, snapshotSignature as snapshotOf } from './smart-wait';
 
 /**
  * Paywall / subscription-wall detection and escape.
@@ -69,6 +69,32 @@ export function detectPaywall(nodes: UiNode[], appPackage: string, w: number, h:
   return { isPaywall: false, reason: '', blocking: false };
 }
 
+/**
+ * The unlabelled icon button that closes a subscription sheet.
+ *
+ * Paywalls overwhelmingly render their dismiss affordance as a bare ImageView
+ * with no text, no content-description and no resource-id — so geometry is the
+ * only signal available: a SMALL control near a top corner.
+ *
+ * The vertical band is deliberately generous (top 30%, not 20%). A real
+ * measurement on a 720x1600 device found a subscription sheet whose close button
+ * sat at y-centre 362px — 22.6% down, below the status bar and the sheet's own
+ * top padding. A 20% cut-off missed it by 42px, so every escape strategy fell
+ * through to tapping the scrim and pressing BACK, and the paywall was reported
+ * as undismissable while a working X sat on screen.
+ */
+function looksLikeCloseIcon(n: UiNode, w: number, h: number): boolean {
+  if (!/ImageButton|ImageView|Button|View/i.test(n.className)) return false;
+  if (!n.clickable || !n.enabled) return false;
+  const width = n.bounds.right - n.bounds.left;
+  const height = n.bounds.bottom - n.bounds.top;
+  // Must be icon-sized: a full-width hero image is not a close button.
+  if (width <= 0 || height <= 0) return false;
+  if (width > w * 0.25 || height > h * 0.12) return false;
+  const c = centerOf(n.bounds);
+  return c.y < h * 0.3 && (c.x < w * 0.25 || c.x > w * 0.75);
+}
+
 function findEscapeControls(nodes: UiNode[], w: number, h: number): UiNode[] {
   const scored: Array<{ n: UiNode; score: number }> = [];
   for (const n of nodes) {
@@ -81,10 +107,7 @@ function findEscapeControls(nodes: UiNode[], w: number, h: number): UiNode[] {
     // Never treat a purchase control as an escape.
     if (PURCHASE_WORDS.test(label)) score -= 10;
     if (!n.clickable) score -= 2;
-    if (/ImageButton|ImageView/i.test(n.className) && !label && n.clickable) {
-      const c = centerOf(n.bounds);
-      if (c.y < h * 0.2 && (c.x < w * 0.2 || c.x > w * 0.8)) score += 3;
-    }
+    if (!label && looksLikeCloseIcon(n, w, h)) score += 4;
     if (score >= 3) scored.push({ n, score });
   }
   return scored.sort((a, b) => b.score - a.score).map((s) => s.n);
@@ -95,10 +118,27 @@ export interface PaywallEscapeResult {
   attempts: string[];
 }
 
+/** Whether an explicit "Not now / Maybe later / Skip / close" control exists now. */
+export function hasEscapeControl(nodes: UiNode[], w: number, h: number): boolean {
+  return findEscapeControls(nodes, w, h).length > 0;
+}
+
+/** Paywalls in a chain (offer → downsell → win-back) before conceding. */
+const MAX_PAYWALL_LINKS = 4;
+
 /**
  * Tries, in escalating order: an explicit dismiss control, tapping outside the
  * sheet, swiping a bottom sheet down, then Back. Purchase controls are
  * explicitly excluded from every strategy.
+ *
+ * Paywalls CHAIN. Closing the headline offer commonly reveals a discounted
+ * downsell ("or a world of creativity — ₹5"), which is a different screen with
+ * its own close button. Measured on a real device, this ran its escape-control
+ * search once, then — because a paywall was still detected — fell through to
+ * tapping the scrim, swiping and BACK against the *new* screen, and reported the
+ * paywall as undismissable while a working X sat on it. So the control search is
+ * re-run for each link of the chain, and the blunt fallbacks are spent only once
+ * progress has genuinely stalled.
  */
 export async function escapePaywall(
   serial: string,
@@ -108,22 +148,53 @@ export async function escapePaywall(
 ): Promise<PaywallEscapeResult> {
   const attempts: string[] = [];
 
+  /**
+   * Escape succeeded once the surface no longer BLOCKS the app.
+   *
+   * This used to test `isPaywall`, which stays true for any screen that merely
+   * mentions purchase vocabulary — a Settings row reading "Upgrade", or the
+   * pricing strip a freemium home screen keeps on display. Dismissing the sheet
+   * correctly and landing on such a screen therefore reported "could not
+   * dismiss" every time, and the caller recorded a coverage limitation and
+   * abandoned the flow it had in fact just unblocked.
+   */
   const stillBlocked = async (): Promise<boolean> => {
     const xml = await dumpHierarchy(serial);
     if (!xml) return false;
     const { nodes } = parseHierarchy(xml);
-    return detectPaywall(nodes, appPackage, w, h).isPaywall;
+    return detectPaywall(nodes, appPackage, w, h).blocking;
   };
 
-  // 1. Explicit escape controls from the live hierarchy.
-  const xml = await dumpHierarchy(serial);
-  const { nodes } = parseHierarchy(xml);
-  for (const c of findEscapeControls(nodes, w, h).slice(0, 4)) {
-    const p = centerOf(c.bounds);
-    await tap(serial, p.x, p.y);
-    attempts.push(`tapped "${labelOf(c) || c.resourceId || c.className}"`);
-    await waitForStableUi(serial, { timeoutMs: 3_500 });
-    if (!(await stillBlocked())) return { escaped: true, attempts };
+  // 1. Explicit escape controls, re-searched for each link of the chain.
+  const triedControls = new Set<string>();
+  for (let link = 0; link < MAX_PAYWALL_LINKS; link++) {
+    const xml = await dumpHierarchy(serial);
+    if (!xml) break;
+    const { nodes } = parseHierarchy(xml);
+    if (!detectPaywall(nodes, appPackage, w, h).blocking) return { escaped: true, attempts };
+
+    // Identify controls by position so the same dead control isn't tapped twice
+    // across links, while a genuinely new screen's control is still eligible.
+    const candidates = findEscapeControls(nodes, w, h)
+      .filter((c) => !triedControls.has(`${c.bounds.left},${c.bounds.top},${c.bounds.right},${c.bounds.bottom}`));
+    if (candidates.length === 0) break;
+
+    let progressed = false;
+    for (const c of candidates.slice(0, 3)) {
+      const key = `${c.bounds.left},${c.bounds.top},${c.bounds.right},${c.bounds.bottom}`;
+      triedControls.add(key);
+      const p = centerOf(c.bounds);
+      await tap(serial, p.x, p.y);
+      attempts.push(`tapped "${labelOf(c) || c.resourceId || c.className}" at ${p.x},${p.y}`);
+      await waitForStableUi(serial, { timeoutMs: 3_500 });
+      if (!(await stillBlocked())) return { escaped: true, attempts };
+      // Still a paywall — but if the SCREEN changed we advanced through the
+      // chain, so re-search rather than falling back to blunt gestures.
+      const afterXml = await dumpHierarchy(serial);
+      if (afterXml && snapshotOf(afterXml) !== snapshotOf(xml)) { progressed = true; break; }
+    }
+    if (!progressed) break;
+    attempts.push('paywall chain advanced — re-searching for a close control');
   }
 
   // 2. Tap outside the sheet (top strip is almost always scrim).

@@ -31,11 +31,9 @@ export const QA_MODULE_BY_KEY = new Map(QA_MODULES.map((m) => [m.key, m]));
 
 export const DEFAULT_SMOKE_MODULES = ['smoke', 'functional', 'ui_ux', 'crash_detection'];
 
-const SCREEN_BANK = [
-  'Splash', 'Onboarding', 'Login', 'Signup', 'Home', 'Search', 'Product List', 'Product Detail',
-  'Cart', 'Checkout', 'Payment', 'Profile', 'Settings', 'Notifications',
-];
-
-export function randomScreen(): string {
-  return SCREEN_BANK[Math.floor(Math.random() * SCREEN_BANK.length)];
-}
+/**
+ * NOTE: `randomScreen()` and its bank of invented screen names were removed
+ * along with the simulated engine. Screen names now come only from the live
+ * target — the resolved activity on Android, or the real URL/title on the web.
+ * Nothing in this platform invents the name of a screen it did not observe.
+ */

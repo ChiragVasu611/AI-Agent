@@ -107,24 +107,42 @@ export class PlanningSession {
 
     // Nothing to do on this screen — is the RUN done, or just this screen?
     const keepGoing = this.shouldContinue(graph);
-    const frontier = graph.frontier().length > 0;
-    if (keepGoing && (frontier || this.reexplorePending) && this.barrenBacktracks < MAX_BARREN_BACKTRACKS) {
+
+    // Work outstanding ANYWHERE keeps the run alive. Actions parked by a
+    // screen's per-visit budget count: they are untried controls, not finished
+    // ones. Treating only the live frontier as "work" is what let a run stop
+    // with most of the app untouched — a couple of busy screens spent their
+    // budget, the frontier emptied, and the planner called the run complete
+    // while coverage sat far below target and goals were still unmet.
+    const pending = graph.frontier().length > 0;
+    const deferred = graph.deferredCount() > 0;
+    const unmetGoals = this.goals.unmetCount();
+    const workRemains = pending || deferred || this.reexplorePending || unmetGoals > 0;
+
+    if (keepGoing && workRemains && this.barrenBacktracks < MAX_BARREN_BACKTRACKS) {
       this.barrenBacktracks += 1;
+      const reason = this.reexplorePending
+        ? 'Re-exploring affected workflows after a state change.'
+        : pending
+          ? 'Screen exhausted — navigating toward screens with unmet goals.'
+          : deferred
+            ? `Screen exhausted — returning to ${graph.deferredFrontier().length} screen(s) with deferred actions.`
+            : `Screen exhausted — ${unmetGoals} goal(s) still unmet; searching for a route to them.`;
       return {
         kind: 'backtrack',
-        reason: this.reexplorePending
-          ? 'Re-exploring affected workflows after a state change.'
-          : 'Screen exhausted — navigating toward screens with unmet goals.',
+        reason,
         source: this.reexplorePending ? 'reexplore' : 'coverage',
       };
     }
-    return {
-      kind: 'stop',
-      reason: this.barrenBacktracks >= MAX_BARREN_BACKTRACKS
-        ? 'No new ground reachable after repeated backtracking.'
-        : 'Coverage goals met or no meaningful actions remain.',
-      source: 'coverage',
-    };
+
+    // Stopping is a real conclusion, so say precisely why — this string is the
+    // run's termination reason in the report.
+    const why = this.barrenBacktracks >= MAX_BARREN_BACKTRACKS
+      ? `No new ground reachable after ${this.barrenBacktracks} consecutive backtracks`
+      : !workRemains
+        ? 'Every discovered action has been executed and no goal remains reachable'
+        : `Coverage target ${Math.round(this.coverage.targetCoverage * 100)}% reached`;
+    return { kind: 'stop', reason: `${why}.`, source: 'coverage' };
   }
 
   private async chooseAction(state: ScreenState, candidates: Interaction[]): Promise<ActionDecision> {
@@ -154,6 +172,18 @@ export class PlanningSession {
   /** Record the outcome of an executed action against the active goal. */
   recordResult(state: ScreenState, action: Interaction, navigated: boolean): void {
     this.goals.recordProgress(state, action, navigated);
+
+    // A goal that stalled is re-queued for one recovery pass rather than being
+    // written off. Surface that in the log so an incomplete run shows what was
+    // retried, and give the re-queued workflows a re-exploration budget so the
+    // planner actively routes back to them instead of waiting to stumble on them.
+    const recovering = this.goals.drainRecoveryQueue();
+    if (recovering.length > 0) {
+      this.reexploreBudget = Math.max(this.reexploreBudget, recovering.length * 4);
+      void this.log('warn',
+        `Goal recovery: ${recovering.join(', ')} made no progress and ${recovering.length === 1 ? 'was' : 'were'} `
+        + 're-queued for another attempt before being reported unreachable.');
+    }
     if (navigated) {
       this.productive.add(action.key);
       this.deadEnds.delete(action.key);
@@ -202,7 +232,9 @@ export class PlanningSession {
 
   shouldContinue(graph: ScreenGraph): boolean {
     const snap = this.snapshot(graph);
-    const pendingActions = graph.frontier().reduce((s, n) => s + n.pendingActions.size, 0);
+    // Deferred actions are outstanding work too — see decide().
+    const pendingActions =
+      graph.frontier().reduce((s, n) => s + n.pendingActions.size, 0) + graph.deferredCount();
     return this.coverage.shouldContinue(snap, {
       pendingActions,
       unmetGoals: this.goals.unmetCount(),

@@ -15,6 +15,8 @@ export interface PersistedTotals {
   total: number;
   passed: number;
   failed: number;
+  /** Rows the database rejected — reported rather than silently lost. */
+  skipped: number;
 }
 
 /**
@@ -45,52 +47,51 @@ export async function persistOutcomes(
 ): Promise<PersistedTotals> {
   let passed = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const o of outcomes) {
-    let bugId: string | null = null;
-    if (o.result === 'fail' && o.finding) {
-      const shot = screenshotFor?.(o.screen) ?? o.finding.screenshotDataUrl ?? null;
-      bugId = await reporter.report(o.finding, shot);
+    // Persisting results is the last step of a long, expensive run. One row that
+    // the schema rejects must not discard everything the run collected, so each
+    // row is written independently and a failure is skipped rather than thrown.
+    try {
+      let bugId: string | null = null;
+      if (o.result === 'fail' && o.finding) {
+        const shot = screenshotFor?.(o.screen) ?? o.finding.screenshotDataUrl ?? null;
+        bugId = await reporter.report(o.finding, shot);
+      }
+
+      const { expected, actual } = expectedActual(o);
+      await QaTestCaseResult.create({
+        runId,
+        testCaseId: o.testCaseId,
+        name: o.name,
+        module: o.module,
+        screen: o.screen,
+        result: o.result,
+        expectedResult: expected,
+        actualResult: actual,
+        failedStepNumber: o.result === 'fail' ? 1 : null,
+        // bugId links only when a NEW bug was created (duplicates return null).
+        bugId: bugId ?? null,
+      });
+
+      if (o.result === 'pass') passed += 1; else failed += 1;
+    } catch (e) {
+      skipped += 1;
+      // eslint-disable-next-line no-console
+      console.error(`persistOutcomes: could not store ${o.testCaseId}`, (e as Error)?.message);
     }
-
-    const { expected, actual } = expectedActual(o);
-    await QaTestCaseResult.create({
-      runId,
-      testCaseId: o.testCaseId,
-      name: o.name,
-      module: o.module,
-      screen: o.screen,
-      result: o.result,
-      expectedResult: expected,
-      actualResult: actual,
-      failedStepNumber: o.result === 'fail' ? 1 : null,
-      // bugId links only when a NEW bug was created (duplicates return null).
-      bugId: bugId ? (bugId as unknown) : null,
-    });
-
-    if (o.result === 'pass') passed += 1; else failed += 1;
   }
 
-  return { total: outcomes.length, passed, failed };
+  return { total: passed + failed, passed, failed, skipped };
 }
 
-/** Overall run verdict from the accumulated evidence. */
-export function computeStatus(
-  severityCounts: Record<string, number>,
-  totalBugs: number,
-): 'passed' | 'partial' | 'failed' {
-  const criticalOrHigh = (severityCounts.critical ?? 0) + (severityCounts.high ?? 0);
-  if (criticalOrHigh > 0) return 'failed';
-  if (totalBugs > 0) return 'partial';
-  return 'passed';
-}
-
-/** A 0–100 quality score derived from real bug counts, weighted by severity. */
-export function computePerformanceScore(severityCounts: Record<string, number>): number {
-  const penalty =
-    (severityCounts.critical ?? 0) * 20
-    + (severityCounts.high ?? 0) * 10
-    + (severityCounts.medium ?? 0) * 4
-    + (severityCounts.low ?? 0) * 1;
-  return Math.max(20, 100 - penalty);
-}
+/**
+ * Verdict rules live in `lib/qa/verdict.ts` — pure functions with no database
+ * dependency, so they can be unit-tested. Re-exported here because callers
+ * already import them from this module.
+ */
+export {
+  assessExercise, computeStatus, computePerformanceScore,
+  type ExerciseEvidence, type ExerciseVerdict,
+} from '@/lib/qa/verdict';
