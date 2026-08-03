@@ -571,6 +571,22 @@ const STOP_WORDS = new Set([
  */
 const UNVERIFIABLE_RE = /\b(?:video|audio|sound|audible|volume|gif|animation|animate|smooth(?:ly)?|duration|second|seconds|fps|frame\s*rate|blurry|overlap|cut\s*off|pixel|colour|color\s+(?:match|correct))\b/i;
 
+/**
+ * Clauses that ask for a judgement rather than for a fact.
+ *
+ * "should be correct", "is true or false", "matches the name", "displays
+ * properly", "looks right" — none of these can be answered from a view
+ * hierarchy, because the hierarchy reports what exists, not whether it is
+ * *right*. A human tester compares a flag to a language name; software cannot,
+ * and pretending otherwise is how the engine produced failures for apps that
+ * were behaving perfectly.
+ *
+ * Kept separate from UNVERIFIABLE_RE, which is about media and timing: this is
+ * about the KIND of question, so it generalises to any sheet's wording instead
+ * of needing a new noun added every time one is discovered.
+ */
+const JUDGEMENT_RE = /\b(?:true\s+or\s+false|correct(?:ly|ness)?|incorrect|match(?:es|ing|ed)?|mismatch|appropriate|accurate|proper(?:ly)?|proper|proportion\w*|proportionate|legible|readable|aligned|alignment|consistent|as\s+expected|look(?:s|ed)?\s+(?:good|right|fine|ok)|should\s+be\s+(?:same|identical)|same\s+as)\b/i;
+
 /** Structural claims that CAN be checked against the live hierarchy. */
 const SCROLLABLE_RE = /\bscroll(?:able|ing)?\b/i;
 const PROGRESSION_RE = /\b(?:move|moves|moved|navigate[ds]?|redirect(?:ed)?|go(?:es)?\s+to|proceed|next\s+screen|following\s+screen|new\s+screen|should\s+appear|should\s+open)\b/i;
@@ -629,6 +645,19 @@ const CHROME_NOUNS = new Set([
   'home', 'screen', 'screens', 'page', 'pages', 'view', 'window', 'dashboard',
   'main', 'app', 'application', 'section', 'panel', 'tab', 'menu', 'popup',
   'dialog', 'modal', 'toast', 'snackbar', 'notification',
+  // Words naming WHEN to look, or the abstract thing being judged, rather than
+  // anything rendered. "Verify the screen displayed after reopening" is an
+  // instruction to inspect the screen; it does not promise the word "reopening"
+  // is on it. Observed on a real run: that single word became the assertion and
+  // failed a case whose app had reopened perfectly, and the resulting Issue told
+  // a developer only that "reopening" was not found on screen. Filtering these
+  // leaves the clause unassertable, so the case-level Expected Result — where
+  // the real expectation lives — is used instead.
+  'reopening', 'reopen', 'reopened', 'reopens', 'relaunch', 'relaunching',
+  'launch', 'launching', 'launched', 'opening', 'closing', 'restart',
+  'restarting', 'foreground', 'navigation', 'transition', 'duration', 'timing',
+  'behaviour', 'behavior', 'functionality', 'state', 'status',
+  'result', 'results', 'output', 'response',
 ]);
 
 function contentWords(text: string): string[] {
@@ -840,6 +869,26 @@ async function evaluateClause(
 
   // 7) Qualities a view hierarchy cannot expose. Reported honestly: neither a
   //    PASS (which would be fabricated) nor an Issue (which would be false).
+  // A clause asking for a HUMAN JUDGEMENT, recognised by what it asks rather
+  // than by which nouns it happens to contain.
+  //
+  // "The country icon with the name should be correct" and "verify the language
+  // name with the country icon is true or false" ask whether two things agree —
+  // a comparison only a person can make. Keyword-matching them searched the
+  // screen for "country"/"true"/"false", found none, and failed an app whose
+  // language list was rendering perfectly. Chasing that one noun at a time
+  // (splash, logo, reopening, country…) never converges; the durable fix is to
+  // recognise the QUESTION being asked. Reported as needing manual confirmation,
+  // which is honest — and it deliberately does not suppress the checkable parts
+  // of the same expectation, because splitClauses judges each clause separately.
+  if (JUDGEMENT_RE.test(clause)) {
+    return {
+      status: 'inconclusive',
+      detail: `"${clause.trim()}" asks whether something is correct, matching or acceptable — a comparison that needs human eyes. The step was executed; this part of the expectation needs manual confirmation rather than being passed or failed automatically.`,
+      assertion: 'needs-human-judgement',
+    };
+  }
+
   if (UNVERIFIABLE_RE.test(clause)) {
     return {
       status: 'inconclusive',
