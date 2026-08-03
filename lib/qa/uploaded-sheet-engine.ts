@@ -823,6 +823,19 @@ export async function executeAndroidSuite(opts: {
       finalResult = 'blocked';
       finalActual = `Execution was blocked at step ${blockedSteps[0].stepNumber} ("${blockedSteps[0].instruction}"): ${blockedSteps[0].actual}`;
       if (firstFailedStepIndex === null) firstFailedStepIndex = blockedSteps[0].stepNumber - 1;
+    } else if (passedSteps.length === 0 && skippedSteps.length > 0) {
+      // Nothing was actually performed. Every step was unmappable, so there is
+      // no evidence of anything — and "no failures" is not the same as "it
+      // works". This branch used to fall through to PASS and report "All N
+      // step(s) executed and the expected result was verified", which is a green
+      // result for work that never happened: the most damaging output this
+      // engine can produce. A case the engine could not execute is BLOCKED, and
+      // it names the steps it could not interpret so the sheet can be reworded.
+      finalResult = 'blocked';
+      finalActual = `Not executed: none of the ${tc.steps.length} step(s) could be mapped to a device action, so nothing was performed and nothing was verified. `
+        + `Unmapped step(s): ${skippedSteps.map((s) => `step ${s.stepNumber} ("${s.instruction}")`).join('; ')}. `
+        + 'Reword these steps as explicit actions (for example "Tap the Continue button", "Enter \'a@b.com\' in the Email field") and re-run.';
+      if (firstFailedStepIndex === null) firstFailedStepIndex = 0;
     } else {
       finalResult = 'pass';
       const base = plan.mode === 'per-step'

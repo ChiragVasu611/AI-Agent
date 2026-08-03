@@ -14,7 +14,13 @@
 export type StepActionKind =
   | 'navigate' | 'click' | 'type' | 'select' | 'check' | 'uncheck' | 'clear'
   | 'hover' | 'press' | 'scroll' | 'wait' | 'submit' | 'verify' | 'proceed'
-  | 'volume' | 'unknown';
+  | 'volume'
+  // Gestures and device actions a manual tester performs routinely. Without
+  // these, ordinary sheet phrasings ("Long press the item", "Minimise the app",
+  // "Kill and reopen the app") were unmappable — and an unmappable step is a
+  // step never performed, so the case cannot honestly be called a pass.
+  | 'longpress' | 'doubletap' | 'home' | 'restart' | 'screenshot'
+  | 'unknown';
 
 export interface StepAction {
   kind: StepActionKind;
@@ -81,6 +87,28 @@ const WAIT_RE = /^(?:wait|pause|sleep)\b/i;
 const SUBMIT_RE = /^(?:submit|send)\b/i;
 const CHECK_RE = /^(?:check|tick|enable)\b/i;
 const UNCHECK_RE = /^(?:uncheck|untick|disable)\b/i;
+
+/** "Long press the item", "press and hold the thumbnail". */
+const LONGPRESS_RE = /^(?:long[\s-]?press|press\s+and\s+hold|hold)\b/i;
+/** "Double tap the image". Tested before CLICK_RE, which would swallow "tap". */
+const DOUBLETAP_RE = /^double[\s-]?(?:tap|click)\b/i;
+/** "Minimise the app", "send the app to the background", "press home". */
+const HOME_RE = /^(?:minimi[sz]e|background)\b|^(?:put|send|move)\b[^.]*\b(?:background)\b|^press\s+home\b|^go\s+to\s+home\s+screen\b/i;
+/**
+ * "Kill and reopen the app", "force stop the app and launch again". A restart is
+ * destructive, so it is honoured ONLY when the sheet asks for it explicitly —
+ * the engine never restarts on its own initiative.
+ */
+const RESTART_RE = /^(?:kill|force[\s-]?stop|terminate|quit)\b[^.]*\b(?:reopen|re-?open|relaunch|launch|start|open)\b|^restart\s+the\s+app\b/i;
+/** "Take a screenshot" — every step already captures one, so this is satisfied. */
+const SCREENSHOT_RE = /^(?:take|capture)\b[^.]*\bscreen\s?shot\b|^screenshot\b/i;
+
+/**
+ * "Wait for the video to finish", "wait until the list loads" — a duration-less
+ * wait. `WAIT_RE` alone parsed these as 1 second (the regex found no digits and
+ * defaulted), which is not what the sheet asked for.
+ */
+const WAIT_FOR_EVENT_RE = /^(?:wait|pause)\b[^.]*\b(?:until|for)\b/i;
 
 /**
  * Steps that mean "move the app forward" without naming a specific control.
@@ -169,6 +197,7 @@ export function interpretStepParts(rawStep: string, testData = ''): StepAction[]
 const ACTION_VERB_RES = [
   VERIFY_RE, NAVIGATE_RE, INSTALL_THEN_LAUNCH_RE, CLICK_RE, TYPE_RE, CLEAR_RE,
   HOVER_RE, SCROLL_RE, WAIT_RE, SUBMIT_RE, CHECK_RE, UNCHECK_RE, PROCEED_RE, VOLUME_RE,
+  LONGPRESS_RE, DOUBLETAP_RE, HOME_RE, RESTART_RE, SCREENSHOT_RE,
 ];
 
 function startsWithActionVerb(clause: string): boolean {
@@ -186,7 +215,11 @@ export function interpretStep(rawStep: string, testData = ''): StepAction {
   // sheets write bare assertions like "Verify app launch" with no copula, and
   // requiring one left them unmappable. Only an explicit checkbox reference
   // falls through to the interaction handler.
-  if (VERIFY_RE.test(raw) && !/\b(?:checkbox|tick ?box)\b/i.test(raw)) {
+  // "Check the Terms box" / "Check the consent option" is an INTERACTION, not an
+  // assertion. The exception used to name only "checkbox"/"tick box", so a bare
+  // "box" — or "terms"/"consent"/"agree" — was read as something to verify and
+  // the box was never ticked.
+  if (VERIFY_RE.test(raw) && !/\b(?:checkbox|tick ?box|box|terms|consent|agree)\b/i.test(raw)) {
     return { kind: 'verify', target: raw.replace(VERIFY_RE, '').trim(), value: '', raw };
   }
 
@@ -202,9 +235,31 @@ export function interpretStep(rawStep: string, testData = ''): StepAction {
       && !/\bback\s+to\s+(?!the\s+(?:previous|last)\b)/i.test(raw)) {
     return { kind: 'press', target: '', value: 'Escape', raw };
   }
+  // Device-level actions, before the generic verbs. "Double tap" must beat
+  // CLICK_RE's "tap", and "Kill and reopen the app" must beat NAVIGATE_RE.
+  if (SCREENSHOT_RE.test(raw)) {
+    return { kind: 'screenshot', target: '', value: '', raw };
+  }
+  if (RESTART_RE.test(raw)) {
+    return { kind: 'restart', target: '', value: '', raw };
+  }
+  if (HOME_RE.test(raw)) {
+    return { kind: 'home', target: '', value: '', raw };
+  }
+  if (DOUBLETAP_RE.test(raw)) {
+    return { kind: 'doubletap', target: cleanTarget(strip(DOUBLETAP_RE)), value: '', raw };
+  }
+  if (LONGPRESS_RE.test(raw)) {
+    return { kind: 'longpress', target: cleanTarget(strip(LONGPRESS_RE)), value: '', raw };
+  }
   if (NAVIGATE_RE.test(raw)) {
     const url = raw.match(/https?:\/\/\S+/)?.[0] ?? raw.match(/\s(\/[\w\-/]*)/)?.[1] ?? '';
     return { kind: 'navigate', target: cleanTarget(strip(NAVIGATE_RE)), value: url, raw };
+  }
+  // "Wait until the list loads" has no duration — settle on the screen instead
+  // of silently substituting one second.
+  if (WAIT_FOR_EVENT_RE.test(raw) && !/\d/.test(raw)) {
+    return { kind: 'wait', target: cleanTarget(strip(WAIT_RE)), value: 'settle', raw };
   }
   if (WAIT_RE.test(raw)) {
     return { kind: 'wait', target: '', value: raw.match(/(\d+)/)?.[1] ?? '1', raw };

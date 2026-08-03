@@ -258,7 +258,16 @@ export async function executeAndroidStep(
         await pressKey(serial, 'KEYCODE_MOVE_END');
         const count = Math.min((field.text?.length ?? 0) + 2, 80);
         await shell(serial, `input keyevent ${Array(count).fill('KEYCODE_DEL').join(' ')}`, 20000);
-        return { ok: true, detail: `Cleared the "${action.target}" field.` };
+        // Observe the result rather than asserting it. Every other input branch
+        // checks what the screen did; this one used to report "Cleared" without
+        // ever looking, so a field that refused to clear still passed.
+        await settleAfterAction(serial, 6000);
+        const afterClear = findNode(await dumpUi(serial, { fresh: true }), action.target, { editable: true });
+        const leftover = afterClear?.text?.trim() ?? '';
+        if (leftover.length > 0) {
+          return { ok: false, detail: `Tried to clear "${action.target}" but it still reads "${leftover}".` };
+        }
+        return { ok: true, detail: `Cleared the "${action.target}" field; it is now empty.` };
       }
 
       case 'check':
@@ -305,11 +314,107 @@ export async function executeAndroidStep(
         // A genuine hardware key press, repeated so the change is audible
         // rather than a single imperceptible increment.
         const code = action.value === 'down' ? 'KEYCODE_VOLUME_DOWN' : 'KEYCODE_VOLUME_UP';
+        // Read the stream volume either side of the press, so the step reports
+        // what actually changed on the device instead of only what was sent.
+        const readVol = async () => {
+          const out = await shell(serial, 'dumpsys audio | grep -m1 -A2 "STREAM_MUSIC"', 10000).catch(() => '');
+          return out.match(/(?:streamVolume|Current):?\s*(\d+)/i)?.[1] ?? null;
+        };
+        const volBefore = await readVol();
         await shell(serial, `input keyevent ${Array(5).fill(code).join(' ')}`, 20000);
-        return { ok: true, detail: `Pressed ${code} five times to turn the volume ${action.value === 'down' ? 'down' : 'up'}.` };
+        await settleAfterAction(serial, 4000);
+        const volAfter = await readVol();
+        const moved = volBefore !== null && volAfter !== null && volBefore !== volAfter;
+        return {
+          ok: true,
+          detail: moved
+            ? `Turned the volume ${action.value === 'down' ? 'down' : 'up'} — the music stream moved from ${volBefore} to ${volAfter}.`
+            : `Pressed ${code} five times to turn the volume ${action.value === 'down' ? 'down' : 'up'}${volAfter !== null ? ` (music stream reads ${volAfter}${volBefore === volAfter ? ', already at its limit' : ''})` : ''}.`,
+        };
+      }
+
+      case 'longpress': {
+        const node = (await waitForElement(serial, action.target, { clickable: true })).node;
+        if (!node) return { ok: false, detail: `No on-screen element matching "${action.target}" was found to long-press.` };
+        const target = resolveTappable(await dumpUi(serial), node) ?? node;
+        const before = uiSignature(await dumpUi(serial));
+        const beforeActivity = await currentActivity(serial);
+        // A long press is a zero-distance swipe with a hold duration.
+        await swipe(serial, target.center.x, target.center.y, target.center.x, target.center.y, 900);
+        const after = await settleAfterAction(serial);
+        const transition = { beforeSignature: before, beforeActivity, afterSignature: after.signature, afterActivity: after.activity };
+        if (after.signature === before && after.activity === beforeActivity) {
+          return { ok: false, detail: `Long-pressed "${action.target}" but nothing on screen changed — the gesture had no effect.`, ...transition };
+        }
+        return { ok: true, detail: `Long-pressed "${action.target}"; the screen responded.`, ...transition };
+      }
+
+      case 'doubletap': {
+        const node = (await waitForElement(serial, action.target, { clickable: true })).node;
+        if (!node) return { ok: false, detail: `No on-screen element matching "${action.target}" was found to double-tap.` };
+        const target = resolveTappable(await dumpUi(serial), node) ?? node;
+        const before = uiSignature(await dumpUi(serial));
+        const beforeActivity = await currentActivity(serial);
+        await tap(serial, target.center.x, target.center.y);
+        await tap(serial, target.center.x, target.center.y);
+        const after = await settleAfterAction(serial);
+        const transition = { beforeSignature: before, beforeActivity, afterSignature: after.signature, afterActivity: after.activity };
+        if (after.signature === before && after.activity === beforeActivity) {
+          return { ok: false, detail: `Double-tapped "${action.target}" but nothing on screen changed.`, ...transition };
+        }
+        return { ok: true, detail: `Double-tapped "${action.target}"; the screen responded.`, ...transition };
+      }
+
+      case 'home': {
+        if (!pkg) return { ok: false, detail: 'No package name is known, so backgrounding cannot be verified.' };
+        await pressKey(serial, 'KEYCODE_HOME');
+        let left = false;
+        for (let i = 0; i < 10 && !left; i++) {
+          await new Promise((r) => setTimeout(r, 400));
+          left = (await foregroundPackage(serial)) !== pkg;
+        }
+        return left
+          ? { ok: true, detail: 'Sent the app to the background with the HOME key.' }
+          : { ok: false, detail: 'Pressed HOME but the app is still in the foreground.' };
+      }
+
+      case 'restart': {
+        // Only ever reached because the SHEET asked for it. The engine never
+        // restarts the app on its own — that is what made it open and close
+        // repeatedly — but a step that explicitly says "kill and reopen" is a
+        // legitimate test of cold-start behaviour.
+        if (!pkg) return { ok: false, detail: 'No package name is known for this app, so it cannot be restarted.' };
+        await shell(serial, `am force-stop ${pkg}`, 15000);
+        for (let i = 0; i < 12; i++) {
+          if (!(await shell(serial, `pidof ${pkg}`, 8000)).trim()) break;
+          await new Promise((r) => setTimeout(r, 350));
+        }
+        await shell(serial, `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`, 20000);
+        const ready = await waitForAppReady(serial, pkg, await currentActivity(serial));
+        return ready.ready
+          ? { ok: true, detail: `Restarted the app as the step requested. ${ready.detail}` }
+          : { ok: false, detail: `Restarted the app as the step requested, but it did not come back to a usable state: ${ready.detail}` };
+      }
+
+      case 'screenshot': {
+        // The engine already captures a real device frame after every step, so
+        // the step's intent is satisfied by that evidence.
+        const screen = await currentActivity(serial);
+        return { ok: true, detail: `Screen captured on ${screen ?? 'the current screen'} — the frame is attached to this step as evidence.` };
       }
 
       case 'wait': {
+        // "Wait until the list loads" — no duration given, so wait for the
+        // screen to actually stop changing instead of guessing a number.
+        if (action.value === 'settle') {
+          const settled = await waitForUiSettle(serial, { timeoutMs: 15000 });
+          return {
+            ok: true,
+            detail: settled.settled
+              ? `Waited for the screen to finish loading (${Math.round(settled.waitedMs / 100) / 10}s).`
+              : `Waited ${Math.round(settled.waitedMs / 100) / 10}s but the screen was still changing.`,
+          };
+        }
         const secs = Math.min(10, Math.max(1, Number(action.value) || 1));
         await new Promise((r) => setTimeout(r, secs * 1000));
         return { ok: true, detail: `Waited ${secs}s.` };

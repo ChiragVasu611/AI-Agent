@@ -945,8 +945,16 @@ function matchTappable(nodes: UiNode[], labels: string[], intent?: ForwardIntent
   const tryCandidates = (predicate: (n: UiNode) => boolean): UiNode | null => {
     for (const n of nodes) {
       if (!n.enabled || !predicate(n)) continue;
+      // Never satisfy a forward/dismiss intent with something inside an ad.
+      // An interstitial's call-to-action is very often labelled with exactly the
+      // words this matcher looks for — "Continue", "OK", "Get started" — so
+      // without this filter the engine could tap the advertisement's CTA (which
+      // opens the Play Store or a browser) while believing it had advanced the
+      // app. `findIconAffordance` and `findSelectableChoice` already exclude ad
+      // nodes; this is the same rule for the label-driven path.
+      if (isAdNode(nodes, n)) continue;
       const tappable = resolveTappable(nodes, n);
-      if (tappable) return tappable;
+      if (tappable && !isAdNode(nodes, tappable)) return tappable;
     }
     return null;
   };
