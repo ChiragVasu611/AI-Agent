@@ -1,7 +1,7 @@
 'use server';
 
+import { requireWorkspaceAction } from '@/lib/auth/require-workspace';
 import { revalidatePath } from 'next/cache';
-import { getCurrentUser } from '@/lib/auth/session';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
@@ -39,8 +39,9 @@ export async function resolveSheetRows(userId: string, sheetId: string, versionI
 }
 
 export async function startTestExecution(formData: FormData) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   const sourceType = String(formData.get('sourceType') ?? '') as QaSourceType;
   const sourceRef = String(formData.get('sourceRef') ?? '').trim();
@@ -121,8 +122,9 @@ export async function startTestExecution(formData: FormData) {
  * lives on someone's own device destroys their real logins/photos/downloads.
  */
 export async function startInstalledAppExecution(formData: FormData) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   const packageName = String(formData.get('packageName') ?? '').trim();
   const requestedSerial = String(formData.get('deviceId') ?? '').trim();
@@ -195,8 +197,9 @@ export async function startInstalledAppExecution(formData: FormData) {
 }
 
 export async function startUploadedTestExecution(formData: FormData) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   const sourceType = String(formData.get('sourceType') ?? '') as QaSourceType;
   const sourceRef = String(formData.get('sourceRef') ?? '').trim();
@@ -286,8 +289,9 @@ export async function startUploadedTestExecution(formData: FormData) {
 }
 
 export async function saveQaApiKey(apiKey: string, tier: 'free' | 'paid') {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
   await User.findByIdAndUpdate(user.id, {

@@ -11,7 +11,7 @@ import {
 import { toast } from 'sonner';
 import { startUploadedTestExecution } from '@/app/qa/actions';
 import { cancelQaTestRun } from '@/app/qa/runs/actions';
-import { submitBinaryRun } from '@/lib/qa/submit-binary-run';
+import { submitBinaryRun, type SubmitProgress } from '@/lib/qa/submit-binary-run';
 import { attachSelectedDevice } from '@/lib/qa/selected-device';
 import { SelectedDeviceBanner } from '@/components/modules/qa/selected-device-banner';
 import { exportCsv, exportExcel } from '@/lib/qa/export';
@@ -271,7 +271,30 @@ export default function TestCaseExecutionPage() {
   const [testCases, setTestCases] = useState<any[]>([]);
   /** Freshly captured device frame while a run is live; falls back to the last
    *  stored step screenshot once the run finishes. */
+  /**
+   * Upload progress for the Start Execution button. A 100MB+ APK takes tens of
+   * seconds to reach the server and that wait used to be an indefinite spinner,
+   * which is indistinguishable from the app having hung.
+   */
+  const [uploadProgress, setUploadProgress] = useState<SubmitProgress | null>(null);
   const [liveFrame, setLiveFrame] = useState<string | null>(null);
+  /**
+   * The live snapshot that came back WITH the frame above — module, test case,
+   * step, expected, actual, verdict — so every tile in the Live Device panel is
+   * describing the same moment as the image, not a value fetched 1.5s apart on
+   * a different poll.
+   */
+  const [liveStatus, setLiveStatus] = useState<{
+    live?: boolean;
+    inSync?: boolean | null;
+    frameInfo?: { screenName?: string; testCaseId?: string; stepNumber?: number | null } | null;
+    current?: {
+      module?: string | null; testCaseId?: string | null; scenario?: string | null;
+      step?: string | null; stepNumber?: number | null; expected?: string;
+      actual?: string; status?: string | null; screen?: string | null;
+    };
+    progress?: number;
+  } | null>(null);
 
   // Test case table controls
   const [tcSearch, setTcSearch] = useState('');
@@ -322,13 +345,21 @@ export default function TestCaseExecutionPage() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [runId]);
 
-  // Real-time device streaming: one freshly captured frame per tick, so the
-  // panel follows the device continuously instead of only updating when a step
-  // completes. Server-side throttling keeps this from competing with the
-  // engine's own device calls, and each response carries a single image.
+  // Real-time device streaming: picks up the engine's latest stored step
+  // screenshot, so the panel follows execution without ever touching the
+  // device itself from this route (see live-frame/route.ts — a previous
+  // version captured independently on a timer and measured an 8s stall from
+  // contending with the engine's own adb calls). A plain DB read is cheap
+  // enough to poll quickly with no downside.
+  // The frame AND the text describing it arrive together from one endpoint.
+  // They used to come from two endpoints on different intervals (this one at
+  // 500ms, the run document at 1500ms), so the image on screen and the
+  // Expected/Actual/verdict beside it regularly described different steps.
   useEffect(() => {
     if (!runId || run?.status !== 'running') {
-      setLiveFrame(null);
+      // Keep the last frame on screen after the run ends rather than blanking
+      // the panel; `live` is what drives the streaming indicator.
+      setLiveStatus(null);
       return;
     }
     let cancelled = false;
@@ -336,10 +367,13 @@ export default function TestCaseExecutionPage() {
     async function pump() {
       const res = await fetch(`/api/qa/runs/${runId}/live-frame`).then((r) => r.json()).catch(() => null);
       if (cancelled) return;
-      if (res?.frame) setLiveFrame(res.frame);
-      // Chained rather than a fixed interval, so a slow capture cannot pile up
-      // overlapping requests and make the stream lag further behind.
-      timer = setTimeout(pump, 1000);
+      if (res && !res.error) {
+        if (res.frame) setLiveFrame(res.frame);
+        setLiveStatus(res);
+      }
+      // Chained rather than a fixed interval, so a slow response cannot pile up
+      // overlapping requests.
+      timer = setTimeout(pump, 500);
     }
     pump();
     return () => { cancelled = true; clearTimeout(timer); };
@@ -421,8 +455,9 @@ export default function TestCaseExecutionPage() {
       // server action, since server actions in this Next.js version cap request
       // bodies at 1MB — far too small for a real app binary.
       const res = isBinarySource
-        ? await submitBinaryRun(formData)
+        ? await submitBinaryRun(formData, setUploadProgress)
         : await startUploadedTestExecution(formData);
+      setUploadProgress(null);
       if (res?.error) {
         toast.error(res.error);
         return;
@@ -774,8 +809,31 @@ export default function TestCaseExecutionPage() {
                   <SelectedDeviceBanner show={isBinarySource || (platform === 'android' && androidMode === 'url')} />
                   <Button type="submit" disabled={pending} className="w-full gap-2">
                     {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                    Start Execution
+                    {/*
+                      A 100MB+ APK takes tens of seconds to reach the server, and
+                      that used to be an unlabelled spinner — indistinguishable
+                      from a hang. Report the actual percentage while bytes are
+                      moving, then say the server is working, so the wait is
+                      always accounted for.
+                    */}
+                    {!pending && 'Start Execution'}
+                    {pending && !uploadProgress && 'Starting…'}
+                    {pending && uploadProgress?.processing && 'Preparing run on the server…'}
+                    {pending && uploadProgress && !uploadProgress.processing && (
+                      uploadProgress.percent != null
+                        ? `Uploading app… ${uploadProgress.percent}%`
+                        : 'Uploading app…'
+                    )}
                   </Button>
+                  {pending && uploadProgress && !uploadProgress.processing && uploadProgress.percent != null && (
+                    <>
+                      <Progress value={uploadProgress.percent} className="h-1.5" />
+                      <p className="text-center text-[11px] text-muted-foreground">
+                        {(uploadProgress.loadedBytes / 1048576).toFixed(0)}MB of {(uploadProgress.totalBytes / 1048576).toFixed(0)}MB sent —
+                        {' '}execution begins automatically once the upload completes.
+                      </p>
+                    </>
+                  )}
                 </div>
               </form>
             </Card>
@@ -811,21 +869,47 @@ export default function TestCaseExecutionPage() {
                   <span className="text-xs text-muted-foreground">{run.progress}%</span>
                 </div>
                 <Progress value={run.progress} className="h-2" />
+                {/*
+                  While the run is live these tiles read the SAME response that
+                  delivered the frame beside them (`liveStatus`), falling back to
+                  the run document only once the run has ended.
+
+                  Two earlier versions of this were wrong in opposite directions.
+                  First the values came from `lastEvaluated` — the last COMPLETED
+                  case — so they described the previous test case under a "Live"
+                  heading. Then they came from the run document, which is correct
+                  data but arrives on a 1500ms poll while the frame arrives on a
+                  500ms one, so image and text still drifted apart. Reading both
+                  from one response is what actually keeps them together.
+                */}
+                {(() => {
+                  const cur = (run.status === 'running' ? liveStatus?.current : null) ?? null;
+                  const val = (live: string | null | undefined, fallback: string | null | undefined) =>
+                    (run.status === 'running' ? (live ?? fallback) : fallback) || '—';
+                  const moduleName = val(cur?.module, run.currentModule ?? run.currentSuite);
+                  const tcId = val(cur?.testCaseId, run.currentTestCaseId ?? run.currentCase);
+                  const scenario = val(cur?.scenario, run.currentScenario);
+                  const stepText = val(cur?.step, run.currentStep);
+                  const screen = val(cur?.screen, run.currentScreen);
+                  const expected = val(cur?.expected, run.currentExpected);
+                  const actual = val(cur?.actual, run.currentActual);
+                  const stepStatus = (run.status === 'running' ? cur?.status : null) ?? run.currentStepStatus;
+                  return (
                 <div className="mt-4 grid grid-cols-2 gap-3 text-xs sm:grid-cols-3">
-                  <div><div className="text-muted-foreground">Current Scenario</div><div className="truncate font-medium" title={run.currentSuite ?? undefined}>{run.currentSuite ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Test Case ID</div><div className="truncate font-medium" title={run.currentCase ?? undefined}>{run.currentCase ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Test Step</div><div className="truncate font-medium" title={run.currentStep ?? undefined}>{run.currentStep ?? '—'}</div></div>
+                  <div><div className="text-muted-foreground">Current Module</div><div className="truncate font-medium" title={moduleName}>{moduleName}</div></div>
+                  <div><div className="text-muted-foreground">Current Test Case ID</div><div className="truncate font-medium" title={tcId}>{tcId}</div></div>
+                  <div><div className="text-muted-foreground">Current Test Case</div><div className="truncate font-medium" title={scenario}>{scenario}</div></div>
+                  <div><div className="text-muted-foreground">Current Test Step</div><div className="truncate font-medium" title={stepText}>{stepText}</div></div>
+                  <div><div className="text-muted-foreground">Current Screen</div><div className="truncate font-medium" title={screen}>{screen}</div></div>
                   <div><div className="text-muted-foreground">Current Feature</div><div className="truncate font-medium" title={run.currentFeature ?? undefined}>{run.currentFeature ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Screen</div><div className="truncate font-medium" title={run.currentScreen ?? undefined}>{run.currentScreen ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Step Number</div><div className="font-medium">{testCases.filter((t) => t.result !== 'pending').length} / {testCases.length || run.totalCases}</div></div>
-                  <div><div className="text-muted-foreground">Expected Result</div><div className="truncate font-medium" title={lastEvaluated?.expectedResult ?? undefined}>{lastEvaluated?.expectedResult ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Actual Result</div><div className="truncate font-medium" title={lastEvaluated?.actualResult ?? undefined}>{lastEvaluated?.actualResult ?? '—'}</div></div>
+                  <div><div className="text-muted-foreground">Expected Result</div><div className="truncate font-medium" title={expected}>{expected}</div></div>
+                  <div><div className="text-muted-foreground">Actual Result</div><div className="truncate font-medium" title={actual}>{actual}</div></div>
                   <div>
                     <div className="text-muted-foreground">Pass / Fail Status</div>
-                    {lastEvaluated ? (
+                    {stepStatus && stepStatus !== 'running' ? (
                       <span className="inline-flex items-center gap-1.5">
-                        <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[lastEvaluated.result])} />
-                        <Badge className={`${STATUS_BADGE[lastEvaluated.result]} text-[10px]`}>{lastEvaluated.result}</Badge>
+                        <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[stepStatus] ?? 'bg-muted-foreground')} />
+                        <Badge className={`${STATUS_BADGE[stepStatus] ?? STATUS_BADGE.pending} text-[10px]`}>{stepStatus}</Badge>
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1.5">
@@ -835,6 +919,8 @@ export default function TestCaseExecutionPage() {
                     )}
                   </div>
                 </div>
+                  );
+                })()}
               </Card>
 
               {/* Test Case Table */}
@@ -941,33 +1027,49 @@ export default function TestCaseExecutionPage() {
               </div>
             </div>
             {!run ? (
-              <Skeleton className="mx-auto aspect-[9/16] max-h-[420px] w-full rounded-xl" />
+              <Skeleton className="mx-auto h-[min(58vh,440px)] min-h-[280px] w-full rounded-[22px]" />
             ) : (
               <>
-                {/* object-contain, so the whole device screen stays visible at
-                    its real aspect ratio instead of being cropped to fill. */}
-                <div className="mx-auto grid aspect-[9/16] max-h-[420px] place-items-center overflow-hidden rounded-xl border border-border bg-secondary/20">
-                  {liveFrame || screenshots.length > 0 ? (
-                    <img
-                      src={liveFrame ?? screenshots[screenshots.length - 1].imageDataUrl}
-                      alt="Current device screen"
-                      className="h-full w-full object-contain"
-                    />
-                  ) : run.engineMode === 'real_browser' ? (
-                    <Globe className="h-8 w-8 text-muted-foreground" />
-                  ) : (
-                    <Smartphone className="h-8 w-8 text-muted-foreground" />
-                  )}
+                {/*
+                  Device frame: a fixed-HEIGHT, flexible-width bezel — deliberately
+                  NOT a CSS aspect-ratio box. Combining `aspect-[..]` with a
+                  `max-h-[..]` clamp (the previous approach) made the box's
+                  rendered shape disagree with its own declared ratio once the
+                  clamp kicked in, and a percentage-sized child (`h-full` on the
+                  <img>) could then compute against the pre-clamp height in some
+                  browsers — cropping the bottom via overflow-hidden.
+                  A plain fixed-height box sidesteps that class of bug entirely:
+                  object-contain letterboxes the real device frame (whatever its
+                  actual ratio — 16:9, 18:9, 20:9, tablets, anything) to fit
+                  inside, full stop. Never crops, never stretches.
+                */}
+                <div className="relative mx-auto flex h-[min(58vh,440px)] min-h-[280px] w-full items-center justify-center rounded-[22px] border-[3px] border-neutral-800 bg-black p-2 shadow-lg dark:border-neutral-700">
+                  {/* Speaker/notch cutout — purely cosmetic, gives the frame a
+                      device-like silhouette without assuming a specific model. */}
+                  <div className="pointer-events-none absolute left-1/2 top-0 z-10 h-3.5 w-16 -translate-x-1/2 rounded-b-lg bg-neutral-800 dark:bg-neutral-700" />
+                  <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl bg-secondary/20">
+                    {liveFrame || screenshots.length > 0 ? (
+                      <img
+                        src={liveFrame ?? screenshots[screenshots.length - 1].imageDataUrl}
+                        alt="Current device screen"
+                        className="h-full w-full object-contain"
+                      />
+                    ) : run.engineMode === 'real_browser' ? (
+                      <Globe className="h-8 w-8 text-muted-foreground" />
+                    ) : (
+                      <Smartphone className="h-8 w-8 text-muted-foreground" />
+                    )}
+                  </div>
                 </div>
-                {/* The "Live Test Execution" card in the main column already
-                    breaks out Module/TC/Step/Expected/Actual in full — this is
-                    just enough context to read the frame on its own, plus the
-                    in-flight step's own verdict (that card only has the last
-                    *completed* case's, one step behind during a run). */}
+                {/* The "Live Test Execution" card in the main column breaks out
+                    Module/TC ID/Test Case/Step/Expected/Actual/verdict in full,
+                    all from the same live run fields. This strip repeats only
+                    enough to read the frame on its own. */}
                 <div className="mt-2 space-y-1.5 text-[11px]">
-                  {(run.currentSuite || run.currentCase) && (
+                  {(run.currentModule || run.currentTestCaseId || run.currentSuite) && (
                     <div className="truncate font-medium text-foreground">
-                      {run.currentSuite}{run.currentSuite && run.currentCase ? ' · ' : ''}{run.currentCase}
+                      {[run.currentModule ?? run.currentSuite, run.currentTestCaseId ?? run.currentCase]
+                        .filter(Boolean).join(' · ')}
                     </div>
                   )}
                   {run.currentStep && (

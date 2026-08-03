@@ -126,7 +126,29 @@ export const ROUTE_PERMISSIONS: Array<{ prefix: string; permission: Permission }
   { prefix: '/seo', permission: 'workspace:seo' },
 ];
 
+/**
+ * API prefix -> permission required to call it.
+ *
+ * Kept separate from ROUTE_PERMISSIONS because the two need different failure
+ * behaviour: a page gets a redirect to /403, an API call gets a JSON 403 (a
+ * redirect to an HTML page is useless to `fetch` and shows up as a confusing
+ * 200-with-HTML at the call site).
+ *
+ * ROUTE_PERMISSIONS entries are page paths, so '/api/qa/…' never matched any of
+ * them and the whole API surface was authentication-only — see api-guard.ts.
+ * Every namespace listed here is gated in middleware AND, defence-in-depth, in
+ * each handler via requireApiPermission().
+ *
+ * NOTE: the other namespaces under app/api (hr, seo, app-factory, designer,
+ * design-*, projects, agent-runs) have the same authentication-only exposure
+ * and want the same two-line treatment; only QA is covered so far.
+ */
+export const API_ROUTE_PERMISSIONS: Array<{ prefix: string; permission: Permission }> = [
+  { prefix: '/api/qa', permission: 'workspace:qa' },
+];
+
 export function permissionForPath(pathname: string): Permission | null {
-  const match = ROUTE_PERMISSIONS.find((r) => pathname === r.prefix || pathname.startsWith(`${r.prefix}/`));
+  const table = pathname.startsWith('/api/') ? API_ROUTE_PERMISSIONS : ROUTE_PERMISSIONS;
+  const match = table.find((r) => pathname === r.prefix || pathname.startsWith(`${r.prefix}/`));
   return match?.permission ?? null;
 }

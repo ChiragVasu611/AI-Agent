@@ -44,6 +44,14 @@ const qaTestRunSchema = new Schema({
   currentExpected: { type: String, default: '' },
   currentActual: { type: String, default: '' },
   currentStepStatus: { type: String, enum: ['running', 'pass', 'fail', 'blocked', 'skipped'], default: 'running' },
+  /**
+   * Which step within the current test case these live values describe. Paired
+   * with the same field on QaScreenshot so the Live Device panel can tell
+   * whether the frame on screen is the one the text is talking about, instead of
+   * silently rendering a frame from the previous step beside the current step's
+   * expected/actual.
+   */
+  currentStepNumber: { type: Number, default: null },
 
   runNumber: { type: Number, required: true, index: true },
   runName: { type: String, default: '' },
@@ -52,6 +60,13 @@ const qaTestRunSchema = new Schema({
 
   currentSuite: { type: String, default: null },
   currentCase: { type: String, default: null },
+  // The sheet's own columns, kept as their own fields rather than concatenated
+  // into `currentCase`. Live Tracking has to label the Module, the Test Case ID
+  // and the Test Case separately, which a single "TC-001: scenario" string
+  // cannot be split back into reliably (scenarios contain colons).
+  currentModule: { type: String, default: null },
+  currentTestCaseId: { type: String, default: null },
+  currentScenario: { type: String, default: null },
   currentStep: { type: String, default: null },
   currentScreen: { type: String, default: null },
   currentFeature: { type: String, default: null },

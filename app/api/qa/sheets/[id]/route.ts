@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth/session';
+import { requireApiPermission } from '@/lib/auth/api-guard';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaTestCaseSheet } from '@/lib/mongodb/models/QaTestCaseSheet';
 import { serializeDoc } from '@/lib/mongodb/serialize';
 
 /** Full sheet detail, including every version's rows — used by the built-in editor/viewer and Download. */
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  const gate = await requireApiPermission('workspace:qa');
+  if (!gate.ok) return gate.response;
+  const user = gate.user;
 
   await connectToDatabase();
   const sheet = await QaTestCaseSheet.findOne({ _id: params.id, userId: user.id }).lean();

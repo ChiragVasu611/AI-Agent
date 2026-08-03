@@ -4,7 +4,7 @@
 
 @layer base {
   :root {
-    /* Modern SaaS — indigo / violet.
+    /* Modern SaaS — Vasundhara sky blue (#0094EE from the brand logo).
        Only the token VALUES changed; every variable name is identical, so the
        whole app re-skins with no markup or logic changes. */
     --background: 240 33% 98%;
@@ -13,25 +13,28 @@
     --card-foreground: 234 24% 14%;
     --popover: 0 0% 100%;
     --popover-foreground: 234 24% 14%;
-    --primary: 243 75% 59%;
+    --primary: 203 100% 47%;
     --primary-foreground: 0 0% 100%;
     --secondary: 240 30% 96%;
     --secondary-foreground: 234 22% 22%;
     --muted: 240 30% 96%;
     --muted-foreground: 235 12% 48%;
-    --accent: 250 40% 95%;
-    --accent-foreground: 243 55% 42%;
+    --accent: 203 60% 95%;
+    --accent-foreground: 203 70% 35%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
     --border: 240 24% 90%;
     --input: 240 24% 90%;
-    --ring: 243 75% 59%;
+    --ring: 203 100% 47%;
     --success: 152 62% 40%;
     --warning: 38 92% 48%;
-    --chart-1: 243 75% 59%;
-    --chart-2: 262 83% 63%;
-    --chart-3: 199 89% 52%;
-    --chart-4: 168 76% 42%;
+    /* Chart series lead with the brand blue, then step through hues distinct
+       enough to stay legible as a data-viz legend rather than reading as
+       "several shades of the same blue". */
+    --chart-1: 203 100% 47%;
+    --chart-2: 188 94% 43%;
+    --chart-3: 221 83% 53%;
+    --chart-4: 162 72% 40%;
     --chart-5: 330 78% 58%;
     --radius: 0.625rem;
 
@@ -44,16 +47,17 @@
     --sidebar: 240 33% 99%;
     --sidebar-foreground: 234 24% 14%;
     --sidebar-border: 240 24% 91%;
-    /* Informational state, completing success/warning/destructive. */
-    --info: 205 90% 46%;
+    /* A deeper indigo-blue, deliberately distinct from the brand's sky-blue
+       primary so info states don't visually collide with primary actions. */
+    --info: 221 83% 53%;
     --info-foreground: 0 0% 100%;
     /* Sixth chart series for distributions that genuinely need one. */
     --chart-6: 32 90% 52%;
     /* Brand-tinted shadow colour so elevation feels part of the palette. */
-    --shadow-color: 243 60% 40%;
+    --shadow-color: 203 70% 40%;
     /* Controls sit slightly tighter than cards (buttons, inputs, badges). */
     --radius-control: 0.625rem;
-    --radius-card: 0.95rem;
+    --radius-card: 0.75rem;
   }
 
   /*
@@ -71,19 +75,19 @@
     --card-foreground: 240 20% 96%;
     --popover: 235 20% 12%;
     --popover-foreground: 240 20% 96%;
-    --primary: 243 82% 70%;
-    --primary-foreground: 235 40% 10%;
+    --primary: 203 90% 60%;
+    --primary-foreground: 210 45% 10%;
     --secondary: 235 16% 17%;
     --secondary-foreground: 240 18% 92%;
     --muted: 235 16% 17%;
     --muted-foreground: 235 14% 66%;
-    --accent: 243 30% 22%;
-    --accent-foreground: 243 90% 84%;
+    --accent: 203 35% 22%;
+    --accent-foreground: 203 85% 82%;
     --destructive: 0 72% 60%;
     --destructive-foreground: 0 0% 100%;
     --border: 235 14% 20%;
     --input: 235 14% 22%;
-    --ring: 243 82% 70%;
+    --ring: 203 90% 60%;
     --success: 152 55% 50%;
     --warning: 38 92% 58%;
 
@@ -92,17 +96,17 @@
     --sidebar: 235 22% 9%;
     --sidebar-foreground: 240 20% 96%;
     --sidebar-border: 235 14% 18%;
-    --info: 205 85% 60%;
-    --info-foreground: 235 40% 10%;
+    --info: 221 80% 68%;
+    --info-foreground: 221 45% 10%;
 
     /* Chart series lifted for contrast against the dark plotting surface. */
-    --chart-1: 243 82% 70%;
-    --chart-2: 262 84% 74%;
-    --chart-3: 199 88% 62%;
-    --chart-4: 168 66% 55%;
+    --chart-1: 203 95% 62%;
+    --chart-2: 188 85% 55%;
+    --chart-3: 221 80% 68%;
+    --chart-4: 162 60% 55%;
     --chart-5: 330 78% 68%;
     --chart-6: 32 90% 62%;
-    --shadow-color: 235 60% 3%;
+    --shadow-color: 215 60% 3%;
   }
 }
 
@@ -201,7 +205,7 @@
   }
   .text-gradient {
     @apply bg-clip-text text-transparent;
-    background-image: linear-gradient(135deg, hsl(var(--primary)), hsl(262 83% 66%));
+    background-image: linear-gradient(135deg, hsl(var(--primary)), hsl(188 90% 50%));
   }
   .glass {
     background: hsl(var(--card) / 0.85);

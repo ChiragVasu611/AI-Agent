@@ -9,17 +9,23 @@
  * so the preview reflects reality.
  */
 
+import {
+  TEST_CASE_ID_ALIASES, MODULE_ALIASES, FEATURE_ALIASES, SCENARIO_ALIASES,
+  PRECONDITIONS_ALIASES, STEPS_ALIASES, TEST_DATA_ALIASES, EXPECTED_RESULT_ALIASES,
+  PRIORITY_ALIASES, SEVERITY_ALIASES, normalizeHeader as normalize,
+} from '@/lib/qa/sheet-header-aliases';
+
 const HEADER_ALIASES: Record<string, string[]> = {
-  'Test Case ID': ['test case id', 'testcaseid', 'tc id', 'tcid', 'case id', 'id'],
-  Module: ['module'],
-  Feature: ['feature'],
-  'Test Scenario': ['test scenario', 'scenario', 'test case', 'title', 'description'],
-  Preconditions: ['preconditions', 'precondition', 'pre-conditions'],
-  'Test Steps': ['test steps', 'steps', 'test step', 'step'],
-  'Test Data': ['test data', 'data', 'testdata'],
-  'Expected Result': ['expected result', 'expected', 'expected outcome'],
-  Priority: ['priority'],
-  Severity: ['severity'],
+  'Test Case ID': TEST_CASE_ID_ALIASES,
+  Module: MODULE_ALIASES,
+  Feature: FEATURE_ALIASES,
+  'Test Scenario': SCENARIO_ALIASES,
+  Preconditions: PRECONDITIONS_ALIASES,
+  'Test Steps': STEPS_ALIASES,
+  'Test Data': TEST_DATA_ALIASES,
+  'Expected Result': EXPECTED_RESULT_ALIASES,
+  Priority: PRIORITY_ALIASES,
+  Severity: SEVERITY_ALIASES,
 };
 
 export interface SheetPreview {
@@ -28,10 +34,6 @@ export interface SheetPreview {
   rows: string[][];
   totalRows: number;
   modules: string[];
-}
-
-function normalize(h: unknown): string {
-  return String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 export async function parseSheetPreview(file: File): Promise<SheetPreview> {

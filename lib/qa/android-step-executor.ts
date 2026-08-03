@@ -11,7 +11,8 @@ import type { StepAction } from '@/lib/qa/step-interpreter';
 import {
   dumpUi, findNode, inputText, pressKey, screenSize, shell, swipe, tap, visibleText,
   foregroundPackage, waitForUiSettle, uiSignature, currentActivity, waitForAppReady,
-  findForwardAffordance, resolveTappable, waitForUiChange,
+  findForwardAffordance, resolveTappable, waitForUiChange, findSelectableChoice,
+  waitForElement, isTreeUnreadable,
   type UiNode,
 } from '@/lib/qa/android-bridge';
 
@@ -64,10 +65,49 @@ export async function executeAndroidStep(
   pkg: string | null,
 ): Promise<AndroidStepResult> {
   try {
+    // Never interact with a screen that is not the app under test.
+    //
+    // If the app dies part way through a case, every remaining step was
+    // resolving its target against whatever WAS on screen — the launcher. That
+    // produced results far worse than a failure: a step tapped the app's own
+    // home-screen icon, the screen "advanced" (it launched the app), and the
+    // step was recorded as PASS. A green step that never touched the feature it
+    // names is the most damaging thing this engine can output.
+    //
+    // `navigate` is exempt because launching the app is exactly how it gets
+    // back; the keypress/wait/verify kinds are exempt because they either do
+    // not resolve an element or report their own foreground state.
+    const NEEDS_APP_ON_SCREEN = new Set([
+      'click', 'type', 'clear', 'check', 'uncheck', 'select', 'scroll', 'proceed', 'submit', 'hover',
+    ]);
+    if (pkg && NEEDS_APP_ON_SCREEN.has(action.kind)) {
+      const fg = await foregroundPackage(serial);
+      if (fg !== pkg) {
+        return {
+          ok: false,
+          detail: `Not executed: "${fg ?? 'another screen'}" was in the foreground instead of the app under test (${pkg}), so this step would have acted on a different application. The app left the foreground earlier in this test case.`,
+        };
+      }
+    }
+
     switch (action.kind) {
       case 'navigate': {
         // On a native app "navigate/open" means (re)focus the app under test.
         if (!pkg) return { ok: false, detail: 'No package name is known for this app, so it cannot be launched.' };
+
+        // Almost every sheet opens a test case with "Launch the application".
+        // The app is launched ONCE during run preparation and the same session is
+        // kept for the whole suite, so when it is already on screen this step is
+        // already satisfied — re-sending the launcher intent would at best be
+        // wasted work and at worst pop the app back to its root activity,
+        // discarding the place the previous test case had navigated to.
+        if ((await foregroundPackage(serial)) === pkg) {
+          return {
+            ok: true,
+            detail: `The application under test (${pkg}) is already running and in the foreground, so the existing session was kept rather than relaunched.`,
+          };
+        }
+
         await shell(serial, `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`, 20000);
         const fg = await foregroundPackage(serial);
         if (fg !== pkg) {
@@ -107,8 +147,12 @@ export async function executeAndroidStep(
       }
 
       case 'click': {
-        const nodes = await dumpUi(serial);
-        let node = findNode(nodes, action.target, { clickable: true });
+        // Give the control a chance to appear rather than demanding it already
+        // be present — a list still binding or a dialog still animating in is
+        // lateness, not a defect, and a one-shot lookup reported it as one.
+        const waited = await waitForElement(serial, action.target, { clickable: true });
+        const nodes = waited.nodes;
+        let node = waited.node;
         // A named control may not exist on this screen (sheets often name an
         // element generically, e.g. "close icon on ad"). Rather than stalling
         // the whole run, fall back to a forward affordance when the step is
@@ -117,8 +161,23 @@ export async function executeAndroidStep(
           const fallback = findForwardAffordance(nodes, ['dismiss', 'advance', 'grant']);
           if (fallback) node = fallback.node;
         }
+        // "Select a random language", "pick any option" — the sheet is naming a
+        // CHOICE, not a control. There is no element literally labelled "random
+        // language", so a label lookup can only ever fail and file an Issue for
+        // an app that is behaving perfectly. Pick a genuine item out of the list
+        // instead, which is what a tester would do.
+        if (!node && /\b(?:random|randomly|any\s+(?:one|item|option|value)?)\b/i.test(action.raw)) {
+          const choice = findSelectableChoice(nodes);
+          if (choice) node = choice;
+        }
         if (!node) {
-          return { ok: false, detail: `No on-screen element matching "${action.target}" was found. Visible elements: ${screenSummary(nodes)}.` };
+          // Distinguish "the app never rendered this control" from "this screen
+          // exposes nothing to the accessibility tree at all" (a canvas/game/
+          // video surface). Blaming the app for the second is a false failure.
+          if (isTreeUnreadable(nodes)) {
+            return { ok: false, detail: `The current screen exposes no readable elements to the accessibility tree, so "${action.target}" could not be located. This is typical of canvas-rendered, game, or video surfaces and needs manual verification rather than indicating a defect.` };
+          }
+          return { ok: false, detail: `No on-screen element matching "${action.target}" appeared within ${Math.round(waited.waitedMs / 100) / 10}s. Visible elements: ${screenSummary(nodes)}.` };
         }
         if (!node.enabled) {
           return { ok: false, detail: `The element "${action.target}" is present but disabled, so it cannot be tapped.` };
@@ -158,13 +217,14 @@ export async function executeAndroidStep(
         if (!action.value) {
           return { ok: false, detail: `The step asks to enter a value into "${action.target}", but neither the step nor the Test Data column supplied one.` };
         }
-        const nodes = await dumpUi(serial);
-        const field = findNode(nodes, action.target, { editable: true })
+        const waited = await waitForElement(serial, action.target, { editable: true });
+        const nodes = waited.nodes;
+        const field = waited.node
           // Fall back to the already-focused input if the label did not match.
           ?? nodes.find((n) => n.focused && /EditText/i.test(n.className))
           ?? null;
         if (!field) {
-          return { ok: false, detail: `No text field matching "${action.target}" was found. Visible elements: ${screenSummary(nodes)}.` };
+          return { ok: false, detail: `No text field matching "${action.target}" appeared within ${Math.round(waited.waitedMs / 100) / 10}s. Visible elements: ${screenSummary(nodes)}.` };
         }
         await tap(serial, field.center.x, field.center.y);
         // Proceed as soon as the field takes focus (keyboard/cursor changes the
@@ -192,8 +252,7 @@ export async function executeAndroidStep(
       }
 
       case 'clear': {
-        const nodes = await dumpUi(serial);
-        const field = findNode(nodes, action.target, { editable: true });
+        const field = (await waitForElement(serial, action.target, { editable: true })).node;
         if (!field) return { ok: false, detail: `No text field matching "${action.target}" was found to clear.` };
         await tap(serial, field.center.x, field.center.y);
         await pressKey(serial, 'KEYCODE_MOVE_END');
@@ -204,8 +263,7 @@ export async function executeAndroidStep(
 
       case 'check':
       case 'uncheck': {
-        const nodes = await dumpUi(serial);
-        const node = findNode(nodes, action.target, { clickable: true });
+        const node = (await waitForElement(serial, action.target, { clickable: true })).node;
         if (!node) return { ok: false, detail: `No checkbox matching "${action.target}" was found.` };
         await tap(serial, node.center.x, node.center.y);
         await settleAfterAction(serial, 8000);
@@ -271,13 +329,15 @@ export async function executeAndroidStep(
       }
 
       case 'select': {
-        const nodes = await dumpUi(serial);
-        const spinner = findNode(nodes, action.target, { clickable: true });
+        const spinner = (await waitForElement(serial, action.target, { clickable: true })).node;
         if (!spinner) return { ok: false, detail: `No dropdown matching "${action.target}" was found.` };
         await tap(serial, spinner.center.x, spinner.center.y);
         await settleAfterAction(serial, 8000);
-        const optionNodes = await dumpUi(serial);
-        const option = findNode(optionNodes, action.value, { clickable: true });
+        // The option list is populated asynchronously on many pickers, so the
+        // option genuinely may not exist in the frame right after the tap.
+        const opened = await waitForElement(serial, action.value, { clickable: true });
+        const optionNodes = opened.nodes;
+        const option = opened.node;
         if (!option) {
           return { ok: false, detail: `Opened "${action.target}" but no option "${action.value}" was listed. Options on screen: ${screenSummary(optionNodes)}.` };
         }
@@ -306,7 +366,22 @@ export interface AndroidValidation {
   status: 'pass' | 'fail' | 'inconclusive';
   actual: string;
   assertion: string;
+  /**
+   * True when the expectation could not be checked because something genuinely
+   * BLOCKED the check — currently: the app under test was not on screen, so
+   * nothing visible belonged to it.
+   *
+   * This is what lets the engine tell a real blocker apart from an expectation
+   * that simply is not machine-verifiable ("the animation is smooth", "the logo
+   * is centred"). Both come back `inconclusive`, but only the former is a
+   * BLOCKED result — the latter means the step ran fine and a human needs to
+   * confirm the wording, which must not be reported as a blocker.
+   */
+  blocker: boolean;
 }
+
+/** Assertion classes that represent a genuine blocker rather than a soft "cannot judge". */
+const BLOCKING_ASSERTIONS = new Set(['app-not-foreground']);
 
 /**
  * "not"/"never"/"shouldn't" directly negate the verb of the sentence they're
@@ -416,6 +491,36 @@ function splitClauses(expected: string): string[] {
   return [expected.trim()];
 }
 
+/**
+ * Nouns that name UI furniture or a visual artifact rather than any text the
+ * app renders. An app *shows* a splash screen and *shows* a logo; it does not
+ * print the words "splash" or "logo" anywhere, so demanding them on screen is
+ * guaranteed to fail and to file an Issue for a defect that does not exist.
+ *
+ * This is the same trap rule 6 already sidesteps for "title"/"description"/
+ * "button" — generalised, because "A splash screen should be displayed with the
+ * logo and the app name" hit the keyword fallback instead and failed a
+ * perfectly healthy launch.
+ *
+ * When the sheet genuinely means literal on-screen text it can quote it, and
+ * the quoted-literal rule above handles that exactly.
+ */
+const CHROME_NOUNS = new Set([
+  'splash', 'logo', 'image', 'images', 'icon', 'icons', 'banner', 'background',
+  'thumbnail', 'avatar', 'graphic', 'illustration', 'picture', 'photo',
+  'animation', 'spinner', 'loader', 'layout', 'interface', 'design', 'theme',
+  'font', 'alignment', 'placeholder', 'element', 'elements', 'component',
+  // Surface nouns. "The home screen is displayed" names WHICH surface the user
+  // should be looking at — it is not a promise that the word "home" appears
+  // anywhere on it. Left out of this list, that expectation went to the keyword
+  // fallback, searched the rendered text for "home", and failed an app that was
+  // sitting correctly on its home screen showing "HOTSPOT READY". Observed on a
+  // real run; a screen's NAME is almost never text the screen renders.
+  'home', 'screen', 'screens', 'page', 'pages', 'view', 'window', 'dashboard',
+  'main', 'app', 'application', 'section', 'panel', 'tab', 'menu', 'popup',
+  'dialog', 'modal', 'toast', 'snackbar', 'notification',
+]);
+
 function contentWords(text: string): string[] {
   return text
     .toLowerCase().replace(/[^\w\s-]/g, ' ').split(/\s+/)
@@ -434,9 +539,21 @@ export async function validateAndroidExpectation(
 ): Promise<AndroidValidation> {
   const expected = String(expectedRaw ?? '').trim();
   if (!expected) {
-    return { status: 'inconclusive', actual: 'The sheet did not specify an Expected Result, so nothing could be asserted.', assertion: 'none' };
+    // No expectation in the sheet is not a blocker — there was simply nothing
+    // to assert. The step's own execution still decides its verdict.
+    return { status: 'inconclusive', actual: 'The sheet did not specify an Expected Result, so nothing could be asserted.', assertion: 'none', blocker: false };
   }
 
+  // Read-only on purpose. An earlier version called ensureAppForeground() from
+  // here to restore a drifted app before asserting — but that helper's recovery
+  // ladder ends in force-stop + cold launch, and this function runs on every
+  // verify step AND once per case. On an app that self-exits (ad SDK teardown,
+  // OEM background killer) that turned every assertion into another launch, so
+  // the app visibly opened and closed over and over.
+  //
+  // Restoring the app is the engine's job, and it already does it: it re-anchors
+  // with ensureAppForeground once per case. A validator's only job is to report
+  // what is on screen — including, honestly, that the app was not on it.
   const nodes = await dumpUi(serial);
   const screenText = visibleText(nodes).toLowerCase();
   const fg = pkg ? await foregroundPackage(serial) : null;
@@ -460,6 +577,7 @@ export async function validateAndroidExpectation(
       status: 'fail',
       actual: describe(failed) + (passed.length > 0 ? ` (Verified separately: ${describe(passed)})` : ''),
       assertion: failed.map((v) => v.assertion).join('+'),
+      blocker: false,
     };
   }
   if (passed.length > 0) {
@@ -467,12 +585,16 @@ export async function validateAndroidExpectation(
       status: 'pass',
       actual: describe(passed) + (unknown.length > 0 ? ` Not machine-verifiable: ${describe(unknown)}` : ''),
       assertion: passed.map((v) => v.assertion).join('+'),
+      blocker: false,
     };
   }
   return {
     status: 'inconclusive',
     actual: describe(unknown),
     assertion: unknown.map((v) => v.assertion).join('+') || 'none',
+    // Only a genuine obstruction counts. An expectation that is merely
+    // unprovable from a view hierarchy is not a blocker.
+    blocker: unknown.some((v) => BLOCKING_ASSERTIONS.has(v.assertion)),
   };
 }
 
@@ -491,11 +613,39 @@ async function evaluateClause(
   const { nodes, screenText, pkg, fg, context } = ctx;
   const negated = isNegated(clause);
 
-  // 1) Crash / app-alive claims. Stemmed, so "crashing" and "crashes" match too
-  //    — an unstemmed \bcrash\b missed "without crashing" and fell through to
-  //    keyword matching, which then demanded the word "crashing" on screen.
-  if (/\b(?:crash\w*|terminate\w*|force[\s-]?stop\w*|close[ds]?|exit\w*)\b/i.test(clause) && pkg) {
-    const stillUp = fg === pkg;
+  // 1) Crash / app-alive claims — "without crashing", "the app remains open",
+  //    "the screen scrolls without the app closing".
+  //
+  //    Every one of these is really the same checkable question: is the app
+  //    still alive and in front? Answering it from the live device is exact,
+  //    which is why it must be caught HERE rather than falling through to the
+  //    keyword fallback at the bottom — that fallback hunts for the clause's own
+  //    words on screen, so "without the app closing" went looking for the
+  //    literal text "closing", never found it, and reported the app's perfectly
+  //    healthy survival as a FAILURE. Verified against a real run: three cases
+  //    failed this way, one of them semantically inverted.
+  //
+  //    `clos\w*` rather than `close[ds]?`: the old form matched close/closed/
+  //    closes but NOT "closing", which is the participle sheets actually use.
+  const LIVENESS_VOCAB = /\b(?:crash\w*|terminate\w*|force[\s-]?stop\w*|clos\w*|exit\w*|freez\w*|hang\w*|kill\w*|quit\w*|dismiss(?:ed|es)?\s+itself)\b/i;
+  //    Phrases that assert liveness without naming a failure mode at all.
+  const LIVENESS_PHRASE = /\b(?:remain\w*|stay\w*|still|contin\w*|keep\w*)\s+(?:\w+\s+){0,2}?(?:open|running|active|visible|alive|foreground)\b|\b(?:remains?|stays?)\s+(?:open|running|active)\b/i;
+  //    A control literally labelled "Close" is not a liveness claim, so the
+  //    vocabulary only counts when the clause is talking about the app itself.
+  const APP_SUBJECT = /\b(?:app|application|apk|it|screen|page|activity|session)\b/i;
+  const isLivenessClaim = pkg
+    && ((LIVENESS_VOCAB.test(clause) && APP_SUBJECT.test(clause)) || LIVENESS_PHRASE.test(clause));
+
+  if (isLivenessClaim) {
+    // "The app crashed" is too serious a verdict to hang on one reading. A
+    // window transition can briefly report the launcher (dumpsys falls back to
+    // mFocusedApp while focus is null), so confirm the app is really gone
+    // before saying so. Read-only by design — no relaunching from a validator.
+    let stillUp = fg === pkg;
+    for (let recheck = 0; !stillUp && recheck < 3; recheck++) {
+      await new Promise((r) => setTimeout(r, 400));
+      stillUp = (await foregroundPackage(ctx.serial).catch(() => null)) === pkg;
+    }
     // "should launch without crashing" is satisfied by the app being alive;
     // the negation is on "crashing", so a live app is the positive outcome.
     return {
@@ -591,21 +741,42 @@ async function evaluateClause(
   // 8) Fall back to on-screen subject matching. Proportional, not all-or-
   //    nothing: sheets pad expectations with prose, so demanding every word
   //    made real matches fail.
-  const words = contentWords(clause).slice(0, 6);
-  if (words.length === 0) {
+  // Matching the sheet's words against a screen that is not the app under test
+  // compares the expectation to the launcher (or whatever else drifted into
+  // view) and calls the mismatch an app defect. It is not one — we simply never
+  // got to look at the app.
+  if (pkg && fg && fg !== pkg) {
     return {
       status: 'inconclusive',
-      detail: `"${clause.trim()}" contains no assertable on-screen subject, so no automated check could be derived.`,
-      assertion: 'none',
+      detail: `The expected result could not be checked: "${fg}" was in the foreground instead of the app under test (${pkg}), so nothing on screen belonged to it.`,
+      assertion: 'app-not-foreground',
     };
   }
-  const hits = words.filter((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(screenText));
-  const ok = hits.length > 0 && hits.length * 2 >= words.length;
+
+  const words = contentWords(clause).slice(0, 6);
+  // Drop the words that describe UI furniture rather than rendered text. If
+  // that leaves nothing, the clause is a visual description — real, but not
+  // something a view hierarchy can prove either way.
+  const assertable = words.filter((w) => !CHROME_NOUNS.has(w));
+  if (words.length === 0 || assertable.length === 0) {
+    return {
+      status: 'inconclusive',
+      detail: words.length === 0
+        ? `"${clause.trim()}" contains no assertable on-screen subject, so no automated check could be derived.`
+        : `"${clause.trim()}" describes visual presentation (${words.filter((w) => CHROME_NOUNS.has(w)).join(', ')}) rather than any text the app renders, so it cannot be proven from the view hierarchy and needs manual confirmation.`,
+      assertion: words.length === 0 ? 'none' : 'not-machine-verifiable',
+    };
+  }
+  const hits = assertable.filter((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(screenText));
+  // Scored against the words actually asserted, not the raw list — counting
+  // dropped chrome nouns in the denominator would make the threshold
+  // unreachable for any clause that mentioned one.
+  const ok = hits.length > 0 && hits.length * 2 >= assertable.length;
   return {
     status: ok !== negated ? 'pass' : 'fail',
     detail: ok
       ? `The screen shows the expected subject(s): ${hits.join(', ')}.`
-      : `The screen does not show the expected subject(s) — looked for [${words.join(', ')}], found [${hits.join(', ') || 'none'}]. Visible: ${screenSummary(nodes)}.`,
+      : `The screen does not show the expected subject(s) — looked for [${assertable.join(', ')}], found [${hits.join(', ') || 'none'}]. Visible: ${screenSummary(nodes)}.`,
     assertion: 'text-subjects',
   };
 }

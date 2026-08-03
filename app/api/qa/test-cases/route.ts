@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth/session';
+import { requireApiPermission } from '@/lib/auth/api-guard';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { QaTestCaseResult } from '@/lib/mongodb/models/QaTestCaseResult';
@@ -7,8 +7,9 @@ import { QaUploadedTestCase } from '@/lib/mongodb/models/QaUploadedTestCase';
 import { serializeDoc } from '@/lib/mongodb/serialize';
 
 export async function GET(req: Request) {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  const gate = await requireApiPermission('workspace:qa');
+  if (!gate.ok) return gate.response;
+  const user = gate.user;
 
   const runId = new URL(req.url).searchParams.get('runId');
   if (!runId) return NextResponse.json({ error: 'runId is required' }, { status: 400 });

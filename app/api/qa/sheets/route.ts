@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth/session';
+import { requireApiPermission } from '@/lib/auth/api-guard';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaTestCaseSheet } from '@/lib/mongodb/models/QaTestCaseSheet';
 import { serializeDoc } from '@/lib/mongodb/serialize';
@@ -11,8 +11,9 @@ import { serializeDoc } from '@/lib/mongodb/serialize';
  * version is "current" until the user promotes something new).
  */
 export async function GET(req: Request) {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  const gate = await requireApiPermission('workspace:qa');
+  if (!gate.ok) return gate.response;
+  const user = gate.user;
 
   const params = new URL(req.url).searchParams;
   const search = params.get('search')?.toLowerCase().trim() || null;

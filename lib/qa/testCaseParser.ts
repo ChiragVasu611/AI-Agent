@@ -1,4 +1,9 @@
 import * as XLSX from 'xlsx';
+import {
+  TEST_CASE_ID_ALIASES, MODULE_ALIASES, FEATURE_ALIASES, SCENARIO_ALIASES,
+  PRECONDITIONS_ALIASES, STEPS_ALIASES, TEST_DATA_ALIASES, EXPECTED_RESULT_ALIASES,
+  PRIORITY_ALIASES, SEVERITY_ALIASES, normalizeHeader,
+} from '@/lib/qa/sheet-header-aliases';
 
 export interface ParsedTestCase {
   testCaseId: string;
@@ -14,21 +19,17 @@ export interface ParsedTestCase {
 }
 
 const HEADER_ALIASES: Record<keyof Omit<ParsedTestCase, 'steps'> | 'steps', string[]> = {
-  testCaseId: ['test case id', 'testcaseid', 'tc id', 'tcid', 'case id', 'id'],
-  module: ['module'],
-  feature: ['feature'],
-  scenario: ['test scenario', 'scenario', 'test case', 'title', 'description'],
-  preconditions: ['preconditions', 'precondition', 'pre-conditions'],
-  steps: ['test steps', 'steps', 'test step', 'step'],
-  testData: ['test data', 'data', 'testdata'],
-  expectedResult: ['expected result', 'expected', 'expected outcome'],
-  priority: ['priority'],
-  severity: ['severity'],
+  testCaseId: TEST_CASE_ID_ALIASES,
+  module: MODULE_ALIASES,
+  feature: FEATURE_ALIASES,
+  scenario: SCENARIO_ALIASES,
+  preconditions: PRECONDITIONS_ALIASES,
+  steps: STEPS_ALIASES,
+  testData: TEST_DATA_ALIASES,
+  expectedResult: EXPECTED_RESULT_ALIASES,
+  priority: PRIORITY_ALIASES,
+  severity: SEVERITY_ALIASES,
 };
-
-function normalizeHeader(h: string): string {
-  return String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
-}
 
 /**
  * Locate the real header row.
@@ -71,7 +72,15 @@ function buildHeaderMap(headerRow: unknown[]): Map<number, keyof ParsedTestCase>
   return map;
 }
 
-function splitSteps(raw: string): string[] {
+/**
+ * Split one sheet cell into an ordered list of items.
+ *
+ * Authors write a multi-item cell as newline-separated lines, as "1. … 2. …" on
+ * a single line, or both. Exported because the Expected Results column uses the
+ * SAME convention as Steps, and the two must be split identically or a 1:1
+ * pairing between them cannot be trusted (see lib/qa/expected-results.ts).
+ */
+export function splitSheetList(raw: string): string[] {
   if (!raw) return [];
   const text = String(raw);
   const lines = text
@@ -79,6 +88,10 @@ function splitSteps(raw: string): string[] {
     .map((s) => s.replace(/^\d+[.)]\s*/, '').trim())
     .filter(Boolean);
   return lines.length > 0 ? lines : [text.trim()].filter(Boolean);
+}
+
+function splitSteps(raw: string): string[] {
+  return splitSheetList(raw);
 }
 
 export async function parseTestCaseFile(file: File): Promise<ParsedTestCase[]> {

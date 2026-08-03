@@ -40,8 +40,8 @@ const config: Config = {
         sm: '0 1px 2px 0 hsl(234 24% 14% / 0.05)',
         DEFAULT: '0 1px 3px 0 hsl(234 24% 14% / 0.08), 0 1px 2px -1px hsl(234 24% 14% / 0.06)',
         md: '0 4px 14px -2px hsl(234 24% 14% / 0.10)',
-        lg: '0 12px 32px -8px hsl(243 60% 40% / 0.16)',
-        xl: '0 24px 48px -12px hsl(243 60% 40% / 0.20)',
+        lg: '0 12px 32px -8px hsl(203 70% 40% / 0.14)',
+        xl: '0 24px 48px -12px hsl(203 70% 40% / 0.18)',
       },
       colors: {
         background: 'hsl(var(--background))',
@@ -91,6 +91,7 @@ const config: Config = {
         'accordion-up': 'accordion-up 0.2s ease-out',
         'fade-in': 'fade-in 0.4s ease-out both',
         'pulse-glow': 'pulse-glow 2s ease-in-out infinite',
+        shimmer: 'shimmer 1.8s ease-in-out infinite',
       },
     },
   },

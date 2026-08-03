@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth/session';
+import { requireApiPermission } from '@/lib/auth/api-guard';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
 import { serializeDoc } from '@/lib/mongodb/serialize';
 
 export async function GET(req: Request) {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  const gate = await requireApiPermission('workspace:qa');
+  if (!gate.ok) return gate.response;
+  const user = gate.user;
 
   const url = new URL(req.url);
   const runId = url.searchParams.get('runId');

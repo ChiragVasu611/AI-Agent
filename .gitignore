@@ -26,6 +26,7 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+qa-upload-debug.log
 
 # local env files
 .env
@@ -43,3 +44,12 @@ next-env.d.ts
 
 # QA evidence store (screenshots/recordings kept out of the database)
 .qa-evidence/
+
+# App binaries must NEVER live in public/ — everything there is served
+# statically at the site root with no auth and no permission check, so an APK
+# dropped in for a quick test becomes an anonymous download. A 105MB
+# public/__qa_run_apk.apk was found doing exactly that; uploads belong in
+# /.qa-uploads/ (above), which is not served.
+/public/*.apk
+/public/*.aab
+/public/*.ipa

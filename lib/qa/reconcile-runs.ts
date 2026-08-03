@@ -33,8 +33,12 @@ export async function reconcileStaleRuns(userId?: string): Promise<number> {
   const res = await QaTestRun.updateMany(filter, {
     $set: {
       status: 'failed',
-      progress: 100,
+      // Progress is deliberately NOT touched. An interrupted run stopped part
+      // way through, so it must keep the percentage it actually reached —
+      // forcing 100 here labelled a run that died at case 3 of 40 as fully
+      // executed, which is exactly the opposite of what happened.
       currentStep: 'Interrupted',
+      currentStepStatus: 'blocked',
       currentCase: null,
       completedAt: new Date(),
       errorMessage:

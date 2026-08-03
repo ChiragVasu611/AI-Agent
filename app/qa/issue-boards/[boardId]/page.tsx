@@ -14,6 +14,21 @@ import {
 } from '@/lib/issue-boards/constants';
 import { cn } from '@/lib/utils';
 
+/**
+ * A left-edge accent bar keyed by severity — the same at-a-glance triage cue
+ * Jira/Linear-style Kanban cards use, so the most severe issues in a column
+ * are visually distinct before reading any badge text. Written as complete,
+ * literal class strings (not built by concatenating a colour name) so
+ * Tailwind's static scanner can actually find them. Mirrors the same lookup
+ * in the App Factory board so both views read identically.
+ */
+const SEVERITY_ACCENT: Record<string, string> = {
+  critical: 'border-l-4 border-l-destructive',
+  high: 'border-l-4 border-l-orange-500',
+  medium: 'border-l-4 border-l-amber-500',
+  low: 'border-l-4 border-l-border',
+};
+
 interface KanbanCard {
   id: string;
   issueKey: string;
@@ -153,7 +168,7 @@ export default function QaIssueBoardPage({ params }: { params: { boardId: string
           {ISSUE_COLUMNS.map((col) => {
             const columnCards = byColumn.get(col.key) ?? [];
             return (
-              <div key={col.key} className="flex w-[300px] shrink-0 flex-col rounded-xl border border-border bg-card/40 backdrop-blur">
+              <div key={col.key} className="flex w-[300px] shrink-0 flex-col rounded-xl border border-border bg-muted/30 shadow-sm backdrop-blur">
                 <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
                   <span className={cn('h-2 w-2 rounded-full', col.accent)} />
                   <span className="text-sm">{col.emoji}</span>
@@ -169,7 +184,13 @@ export default function QaIssueBoardPage({ params }: { params: { boardId: string
                   ) : columnCards.map((card) => {
                     const due = dueLabel(card.dueDate);
                     return (
-                      <div key={card.id} className="rounded-lg border border-border bg-card p-2.5 shadow-sm">
+                      <div
+                        key={card.id}
+                        className={cn(
+                          'rounded-lg border border-border bg-card p-2.5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md',
+                          SEVERITY_ACCENT[card.severity],
+                        )}
+                      >
                         <div className="flex items-center justify-between gap-2">
                           <span className="font-mono text-[10px] text-muted-foreground">{card.issueKey}</span>
                           {card.reopenCount > 0 && (

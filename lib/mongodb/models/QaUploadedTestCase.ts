@@ -33,6 +33,21 @@ const qaUploadedTestCaseSchema = new Schema({
       instruction: { type: String, default: '' },  // verbatim step text from the sheet
       status: { type: String, enum: ['pass', 'fail', 'blocked', 'skipped'], required: true },
       actual: { type: String, default: '' },
+      /**
+       * The expectation THIS step was judged against — the sheet's per-step
+       * Expected Result when it enumerated one per step, otherwise the case-level
+       * expectation on the step that carried it. Stored per step so the report
+       * can show expected-vs-actual on the row where it was actually asserted,
+       * rather than repeating the case's end-state expectation on every row.
+       */
+      expected: { type: String, default: '' },
+      /**
+       * Whether the expectation was genuinely asserted against the screen. A
+       * PASS with verified:false executed correctly but its expected result was
+       * not machine-checkable (visual quality, timing, audio) — which is a real
+       * pass needing human confirmation, NOT a blocker.
+       */
+      verified: { type: Boolean, default: false },
       assertion: { type: String, default: '' },
       durationMs: { type: Number, default: 0 },
       url: { type: String, default: '' },

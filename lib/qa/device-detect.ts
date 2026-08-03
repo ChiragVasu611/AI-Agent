@@ -420,8 +420,32 @@ async function scanIos(): Promise<{ devices: DetectedDevice[]; issues: Detection
 }
 
 /** Full scan of both platforms. Safe to call on an interval. */
-export async function scanDevices(): Promise<DeviceScan> {
-  const [android, ios] = await Promise.all([scanAndroid(), scanIos()]);
+/**
+ * A skipped platform reports no devices and — importantly — no ISSUES: it was
+ * not probed, so it has nothing to say. Claiming "no iOS tooling found" from a
+ * scan that never looked would put a false problem in front of the user.
+ */
+async function emptyAndroidScan() {
+  return { devices: [] as DetectedDevice[], issues: [] as DetectionIssue[], toolPath: null, version: null };
+}
+async function emptyIosScan() {
+  return { devices: [] as DetectedDevice[], issues: [] as DetectionIssue[], toolName: null };
+}
+
+/**
+ * @param opts.platform Restrict the scan to one platform.
+ *
+ * An Android run has no use for the iOS probe, and that probe is not free: it
+ * tries three tools serially with 5s/12s/12s timeouts and, when `devicectl`
+ * resolves, enumerates a second time with a 15s timeout. On a host with full
+ * Xcode installed that is seconds of latency gating the start of every Android
+ * run, for a result that is immediately filtered out.
+ */
+export async function scanDevices(opts: { platform?: 'android' | 'ios' } = {}): Promise<DeviceScan> {
+  const [android, ios] = await Promise.all([
+    opts.platform === 'ios' ? emptyAndroidScan() : scanAndroid(),
+    opts.platform === 'android' ? emptyIosScan() : scanIos(),
+  ]);
   return {
     devices: [...android.devices, ...ios.devices],
     issues: [...android.issues, ...ios.issues],

@@ -1,17 +1,11 @@
 'use server';
 
+import { requireWorkspaceAction } from '@/lib/auth/require-workspace';
 import { revalidatePath } from 'next/cache';
-import { getCurrentUser } from '@/lib/auth/session';
 import { connectToDatabase } from '@/lib/mongodb/connect';
 import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
-import { QaBug } from '@/lib/mongodb/models/QaBug';
-import { QaLogEntry } from '@/lib/mongodb/models/QaLogEntry';
-import { QaScreenshot } from '@/lib/mongodb/models/QaScreenshot';
-import { QaTestCaseResult } from '@/lib/mongodb/models/QaTestCaseResult';
 import { QaUploadedTestCase } from '@/lib/mongodb/models/QaUploadedTestCase';
-import { QaIssueBoard } from '@/lib/mongodb/models/QaIssueBoard';
-import { QaIssueCard } from '@/lib/mongodb/models/QaIssueCard';
 import { User } from '@/lib/mongodb/models/User';
 import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
 import { runWebTestExecution } from '@/lib/qa/web-engine';
@@ -20,7 +14,7 @@ import { resolveRuntime, isBlocked } from '@/lib/qa/runtime-support';
 import { finalizeBlockedRun } from '@/lib/qa/blocked-run';
 import { runUploadedTestExecution } from '@/lib/qa/uploadedEngine';
 import { nextRunNumber } from '@/lib/qa/run-number';
-import { getEvidenceStore, runPrefix } from '@/lib/qa/evidence/store';
+import { deleteRunCascade } from '@/lib/qa/delete-run';
 
 /**
  * Re-run always creates a brand-new QaTestRun document against the same
@@ -28,8 +22,9 @@ import { getEvidenceStore, runPrefix } from '@/lib/qa/evidence/store';
  * execution stays intact and independently reviewable.
  */
 export async function rerunQaTestRun(runId: string) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
 
@@ -119,8 +114,9 @@ export async function rerunQaTestRun(runId: string) {
  * can be cancelled, and only by their owner.
  */
 export async function cancelQaTestRun(runId: string) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
 
@@ -144,44 +140,20 @@ export async function cancelQaTestRun(runId: string) {
 }
 
 export async function deleteQaTestRun(runId: string) {
-  const user = await getCurrentUser();
-  if (!user) return { error: 'Not authenticated' };
+  const gate = await requireWorkspaceAction('workspace:qa');
+  if (!gate.ok) return { error: gate.error };
+  const user = gate.user;
 
   await connectToDatabase();
 
   const run = await QaTestRun.findOne({ _id: runId, userId: user.id });
   if (!run) return { error: 'Run not found.' };
 
-  // Stored evidence lives outside the database, so deleting the documents alone
-  // would orphan the bytes on disk / in the bucket forever. Sweep the run's whole
-  // key prefix. Best-effort: a storage failure must not block deleting the run.
-  try {
-    const store = await getEvidenceStore();
-    const removed = await store.deletePrefix(runPrefix(runId));
-    if (removed > 0) {
-      // eslint-disable-next-line no-console
-      console.info(`QA: removed ${removed} stored evidence object(s) for run ${runId}`);
-    }
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.error('QA: could not remove stored evidence for run', runId, (e as Error)?.message);
-  }
-
-  await Promise.all([
-    QaBug.deleteMany({ runId }),
-    QaLogEntry.deleteMany({ runId }),
-    QaScreenshot.deleteMany({ runId }),
-    QaTestCaseResult.deleteMany({ runId }),
-    QaUploadedTestCase.deleteMany({ runId }),
-    // The AI Issue Board for this execution goes with it — a board whose
-    // execution no longer exists could never be reviewed or retested.
-    QaIssueCard.deleteMany({ runId }),
-    QaIssueBoard.deleteMany({ runId }),
-  ]);
-  await QaTestRun.deleteOne({ _id: runId });
+  const deleted = await deleteRunCascade({ _id: run._id, projectId: run.projectId });
 
   await ActivityLog.create({
-    userId: user.id, action: 'qa.run.deleted', entity: 'qa_test_run', entityId: runId, meta: { runNumber: run.runNumber },
+    userId: user.id, action: 'qa.run.deleted', entity: 'qa_test_run', entityId: runId,
+    meta: { runNumber: run.runNumber, projectDeleted: deleted.projectDeleted, binaryDeleted: deleted.binaryDeleted },
   });
 
   revalidatePath('/qa/runs');

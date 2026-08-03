@@ -33,7 +33,13 @@ export async function middleware(req: NextRequest) {
 
   const requiredPermission = permissionForPath(pathname);
   if (requiredPermission) {
+    // An API caller is a `fetch`, not a browser navigation: redirecting it to
+    // /login or /403 yields an opaque 200-with-HTML at the call site. Answer
+    // with the real status code instead.
+    const isApi = pathname.startsWith('/api/');
+
     if (!session) {
+      if (isApi) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
       const url = req.nextUrl.clone();
       url.pathname = '/login';
       url.searchParams.set('redirect', pathname);
@@ -42,6 +48,9 @@ export async function middleware(req: NextRequest) {
 
     const perms = permissionsForRole(session.role);
     if (!hasPermission(perms, requiredPermission)) {
+      if (isApi) {
+        return NextResponse.json({ error: 'You do not have access to this workspace.' }, { status: 403 });
+      }
       const url = req.nextUrl.clone();
       url.pathname = '/403';
       return NextResponse.redirect(url);

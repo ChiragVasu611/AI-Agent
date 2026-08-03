@@ -10,7 +10,7 @@
 
 import { execFile } from 'child_process';
 import { existsSync } from 'fs';
-import { mkdtemp, readFile, unlink, writeFile } from 'fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { resolveAdbPath } from '@/lib/qa/device-detect';
@@ -92,8 +92,11 @@ async function compress(pngBuffer: Buffer): Promise<string> {
     }
     return `data:image/png;base64,${pngBuffer.toString('base64')}`;
   } finally {
-    await unlink(src).catch(() => {});
-    await unlink(out).catch(() => {});
+    // Remove the DIRECTORY, not just the two files inside it. Unlinking only
+    // in.png/out.jpg left the mkdtemp dir behind on every single screenshot —
+    // one empty dir per captured frame, tens per run, unbounded (133 had
+    // accumulated in $TMPDIR here before this was fixed).
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -255,26 +258,78 @@ export async function keepDeviceAwake(serial: string): Promise<{ ok: boolean; de
  * or locked device while the app never actually reaches the foreground, so this
  * must run before any launch or interaction.
  */
+/**
+ * Poll a device condition until it holds, instead of sleeping a guessed
+ * duration. A fixed sleep is wrong twice over: it idles on a fast device and
+ * still races on a slow one. Returns whether the condition became true.
+ */
+async function waitForCondition(
+  check: () => Promise<boolean>,
+  opts: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  const pollMs = opts.pollMs ?? 200;
+  const started = Date.now();
+  do {
+    if (await check().catch(() => false)) return true;
+    await new Promise((r) => setTimeout(r, pollMs));
+  } while (Date.now() - started < timeoutMs);
+  return false;
+}
+
 export async function ensureAwake(serial: string): Promise<{ awake: boolean; locked: boolean; detail: string }> {
   const power = await shell(serial, 'dumpsys power | grep -E "mWakefulness="', 12000);
   const asleep = /mWakefulness=(Asleep|Dozing)/i.test(power);
   if (asleep) {
     await shell(serial, 'input keyevent KEYCODE_WAKEUP', 10000);
-    await new Promise((r) => setTimeout(r, 800));
+    // Poll the wakefulness state the keyevent actually changes, rather than
+    // sleeping a guessed 800ms: a fast device is ready in ~100ms and a slow one
+    // sometimes needs longer than the guess did.
+    await waitForCondition(
+      async () => /mWakefulness=Awake/i.test(await shell(serial, 'dumpsys power | grep -E "mWakefulness="', 8000)),
+      { timeoutMs: 4000, pollMs: 150 },
+    );
+  }
+
+  const isLocked = async () => /mDreamingLockscreen=true|isStatusBarKeyguard=true/i.test(
+    await shell(serial, 'dumpsys window | grep -E "mDreamingLockscreen|isStatusBarKeyguard"', 12000),
+  );
+
+  // Waking is asynchronous: KEYCODE_WAKEUP flips wakefulness to Awake a moment
+  // BEFORE the lockscreen finishes presenting. Reading the keyguard state
+  // immediately therefore saw "not locked", skipped the unlock swipe entirely,
+  // and then the final check found the lockscreen up and reported the device as
+  // secured — with nothing having tried to unlock it. Give the keyguard a beat
+  // to appear before deciding whether one is there.
+  if (asleep) {
+    await waitForCondition(isLocked, { timeoutMs: 2000, pollMs: 200 });
   }
 
   // Dismiss a non-secure keyguard with a swipe up. A PIN/pattern lock cannot be
   // bypassed — that is reported so the user knows to unlock the device.
-  const km = await shell(serial, 'dumpsys window | grep -E "mDreamingLockscreen|isStatusBarKeyguard"', 12000);
-  const locked = /mDreamingLockscreen=true|isStatusBarKeyguard=true/i.test(km);
+  //
+  // Retried: the first swipe can land while the lockscreen is still animating
+  // in and be swallowed, and on some skins it opens the notification shade
+  // instead, which then has to be closed before another swipe can reach the
+  // keyguard. One attempt made an unlockable device look permanently locked.
+  const locked = await isLocked();
   if (locked) {
     const { width, height } = await screenSize(serial);
-    await swipe(serial, Math.round(width / 2), Math.round(height * 0.8), Math.round(width / 2), Math.round(height * 0.2), 300);
-    await new Promise((r) => setTimeout(r, 1000));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // A pulled-down shade covers the keyguard and eats the swipe.
+      if (/NotificationShade/i.test(await shell(serial, 'dumpsys window | grep mCurrentFocus', 8000))) {
+        await pressKey(serial, 'KEYCODE_BACK');
+      }
+      await swipe(serial, Math.round(width / 2), Math.round(height * 0.9), Math.round(width / 2), Math.round(height * 0.1), 250);
+      const cleared = await waitForCondition(async () => !(await isLocked()), { timeoutMs: 3000, pollMs: 200 });
+      if (cleared) break;
+      // A menu key is the other standard way to dismiss a non-secure keyguard.
+      await pressKey(serial, 'KEYCODE_MENU');
+      if (await waitForCondition(async () => !(await isLocked()), { timeoutMs: 1500, pollMs: 200 })) break;
+    }
   }
 
-  const after = await shell(serial, 'dumpsys window | grep -E "mDreamingLockscreen"', 12000);
-  const stillLocked = /mDreamingLockscreen=true/i.test(after);
+  const stillLocked = await isLocked();
   return {
     awake: !asleep || true,
     locked: stillLocked,
@@ -297,8 +352,15 @@ export async function launchApp(serial: string, pkg: string, waitMs = 20000): Pr
 
   const activity = await resolveLaunchActivity(serial, pkg);
 
+  // Send the SAME intent the home-screen launcher sends: action MAIN, category
+  // LAUNCHER. With a bare `am start -n <activity>` the activity can be started
+  // as a fresh instance pushed onto the task, which resets the visible screen —
+  // so an app merely sitting in the background came back at its first screen and
+  // lost the place the sheet had walked it to. The launcher intent resumes the
+  // existing task when there is one, and starts the app when there is not, so
+  // the same call serves both the initial launch and a warm bring-to-front.
   const startCmd = activity
-    ? `am start -W -n ${activity}`
+    ? `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n ${activity}`
     : `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`;
   const started = await shell(serial, startCmd, 30000);
 
@@ -531,9 +593,20 @@ export async function waitForUiSettle(
     nodes = await dumpUi(serial, { fresh: true });
     const sig = uiSignature(nodes);
 
-    // A screen showing only a spinner/progress bar is still loading.
-    const busy = nodes.length > 0 && nodes.every(
-      (n) => /ProgressBar|Loading/i.test(n.className) || (!n.text && !n.contentDesc),
+    // Still loading, judged by the two signals that genuinely mean "not ready":
+    //  - a progress indicator is showing AND nothing is interactive yet. The
+    //    old test required EVERY node to be a spinner, which a real loading
+    //    screen never satisfies (it keeps its toolbar and title), so mid-load
+    //    screens were called settled. Requiring only "a spinner exists" is the
+    //    opposite mistake: a screen that legitimately keeps an inline spinner
+    //    next to real, usable content would then never settle at all. Pairing
+    //    it with "nothing to interact with" separates the two cases.
+    //  - nothing on screen carries any label at all (a bare render pass).
+    const interactive = nodes.some((n) => n.clickable || /EditText|Button/i.test(n.className));
+    const spinning = nodes.some((n) => /ProgressBar|Loading|Shimmer|Skeleton/i.test(n.className));
+    const busy = nodes.length > 0 && (
+      (spinning && !interactive)
+      || nodes.every((n) => !n.text && !n.contentDesc)
     );
 
     if (sig === lastSig && sig !== '' && !busy) {
@@ -590,24 +663,111 @@ export async function waitForAppReady(
 ): Promise<{ ready: boolean; activity: string | null; detail: string }> {
   const started = Date.now();
   const splashActivity = launchActivity;
+  // At most ONE relaunch per call. This guard lives outside the loop on
+  // purpose: the recovery below used to sit inside it, so an app that keeps
+  // self-exiting (an ad SDK tearing down its host Activity, or an OEM
+  // background killer) got relaunched on every iteration for the full timeout —
+  // which is exactly the "app repeatedly opening and closing" symptom. One
+  // attempt distinguishes a recoverable drift from a genuinely dead launch;
+  // repeating it just fights the thing that is killing the app.
+  let relaunched = false;
+  // Ad-escape attempts made while waiting for readiness. Bounded so an ad that
+  // reappears on every relaunch cannot drive an endless exit/relaunch cycle.
+  const MAX_AD_ESCAPES = 2;
+  let adEscapes = 0;
 
   while (Date.now() - started < timeoutMs) {
     const settle = await waitForUiSettle(serial, { timeoutMs: 6000 });
     const activity = settle.activity;
 
-    // Lost the app entirely (crash, or it bounced back to the launcher).
-    const fg = await foregroundPackage(serial);
+    // Lost the app entirely — or so it looks. `dumpsys window` can report
+    // `mCurrentFocus=null` for a single frame while one Activity/Window is
+    // swapping in for another, and `foregroundPackage()` falls back to
+    // whatever `mFocusedApp` shows in that instant — occasionally the
+    // launcher's own task. Treating that one blip as a crash aborted
+    // otherwise-healthy launches, so re-check a few times before believing it.
+    let fg = await foregroundPackage(serial);
     if (fg !== pkg) {
-      return { ready: false, activity, detail: `The app left the foreground during startup (now: ${fg ?? 'unknown'}). It may have crashed on launch.` };
+      // Budget by elapsed time, not a fixed attempt count — over a wireless
+      // ADB link each `foregroundPackage` round trip itself has variable
+      // latency, so a small fixed retry count can still run out before the
+      // transition has actually finished on a slow link.
+      const recheckDeadline = Date.now() + 5000;
+      while (fg !== pkg && Date.now() < recheckDeadline) {
+        await new Promise((r) => setTimeout(r, 500));
+        fg = await foregroundPackage(serial);
+      }
+      // Confirmed live: this is not always a transient blip — the app can
+      // genuinely, durably exit to the home screen mid-startup (an ad SDK
+      // tearing down its host Activity, or the OEM's aggressive background
+      // killer) and it does NOT recover on its own no matter how long this
+      // waits. But a plain re-launch reliably brings it straight back — the
+      // same recovery `ensureAppForeground` already relies on when the app
+      // drifts away mid-run. Try that once before declaring the launch dead.
+      if (fg !== pkg && launchActivity && !relaunched) {
+        relaunched = true;
+        await shell(serial, `am start -W -n ${launchActivity}`, 30000).catch(() => '');
+        const relaunchDeadline = Date.now() + 5000;
+        while (fg !== pkg && Date.now() < relaunchDeadline) {
+          await new Promise((r) => setTimeout(r, 500));
+          fg = await foregroundPackage(serial);
+        }
+      }
+      if (fg !== pkg) {
+        return {
+          ready: false,
+          activity,
+          detail: relaunched
+            ? `The app left the foreground during startup (now: ${fg ?? 'unknown'}) and did not come back after a relaunch attempt. It may have crashed on launch.`
+            : `The app left the foreground during startup (now: ${fg ?? 'unknown'}). It may have crashed on launch.`,
+        };
+      }
     }
 
-    // A full-screen ad SDK Activity has its own close/skip button, which reads
-    // as "interactive content" — without this check, "the app is ready" fired
+    // The settle above was captured BEFORE the foreground check, so its nodes
+    // and activity can describe a screen that is no longer showing — most
+    // importantly the launcher, if the app dropped out and then came back
+    // during the re-check/relaunch window. Judging readiness on those nodes
+    // certified the HOME SCREEN as the app being ready: 32 "interactive
+    // elements" that were really the launcher's own icons. Re-settle instead of
+    // ruling on a hierarchy that belongs to another package.
+    if (activity && !activity.startsWith(pkg)) continue;
+
+    // A full-screen ad has its own close/skip button, which reads as
+    // "interactive content" — without this check, "the app is ready" fired
     // the instant an interstitial appeared on launch, so every case behind it
     // ran against the ad instead of the app. Escaping it here defines
     // readiness as the APP's own content, never a third-party ad surface.
-    if (isAdActivity(activity)) {
-      await escapeAdSurface(serial, 2);
+    // Checked two ways: a dedicated AdActivity component (activity name), or
+    // an ad rendered as an overlay INSIDE the app's own activity — confirmed
+    // live that the latter happens on this exact app and leaves the
+    // Activity name unchanged, so relying on the name alone missed it.
+    if (isAdActivity(activity) || looksLikeAdCreative(settle.nodes)) {
+      // Bounded. Escaping an interstitial that sits on the app's LAUNCH screen
+      // has nothing behind it to return to, so the back-press exits the app;
+      // the loop below then relaunches, the ad is served again, and the cycle
+      // repeats — the app visibly opening and closing until this whole function
+      // times out and reports the launch dead. Confirmed live on a real app
+      // whose AdMob interstitial appears ~9s after a first-run launch.
+      adEscapes += 1;
+      const escape = await escapeAdSurface(serial, 2, pkg);
+
+      if (!escape.escaped && adEscapes >= MAX_AD_ESCAPES) {
+        // Stop fighting it. The app is installed, launched and alive — an ad on
+        // the launch screen is an honest condition, not a failed launch. Put the
+        // app back if the escape took it away, then declare it ready and let the
+        // per-step ad handling deal with the interstitial, which prefers the
+        // ad's own labelled close control over a destructive back-press.
+        if (launchActivity && (await foregroundPackage(serial)) !== pkg) {
+          await shell(serial, `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n ${launchActivity}`, 30000).catch(() => '');
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+        return {
+          ready: true,
+          activity: await currentActivity(serial),
+          detail: `The app launched and is running, with an advertisement on its launch screen. ${escape.detail} Execution will start and each step dismisses the ad using its own close control rather than a back-press.`,
+        };
+      }
       continue;
     }
 
@@ -650,13 +810,47 @@ const PERMISSION_PKGS = ['com.google.android.permissioncontroller', 'com.android
 const ADVANCE_LABELS = [
   'continue', 'next', 'get started', 'getstarted', 'start', 'proceed', 'done', 'finish',
   'got it', 'ok', 'okay', 'yes', 'confirm', 'agree', 'i agree', 'accept', 'submit', 'save', 'apply',
+  // Onboarding carousels and tutorial overlays: the last slide's control is
+  // usually one of these rather than "Next".
+  'lets go', "let's go", 'start now', 'begin', 'explore', 'try it', 'understood',
 ];
 const GRANT_LABELS = [
   'while using the app', 'only this time', 'allow all the time', 'allow', 'grant', 'turn on',
 ];
 const DISMISS_LABELS = [
   'skip', 'skip for now', 'not now', 'no thanks', 'later', 'maybe later', 'close', 'dismiss', 'cancel', '×', '✕', 'x',
+  // Update / "new version available" prompts. These are the app-store nag, not
+  // the app under test — taking the update would install a DIFFERENT build than
+  // the one the sheet is meant to be validating, so the decline path is the only
+  // correct one and it must outrank the ADVANCE list's "ok"/"yes".
+  'no, thanks', 'update later', 'remind me later', 'ask me later', 'not right now', 'ignore',
+  // Cookie / tracking-consent notices. Declining is both the privacy-preserving
+  // choice and the one that leaves the app in its default state, which is what
+  // the sheet's later steps were written against.
+  'reject all', 'decline all', 'decline', 'reject', 'only necessary', 'necessary only',
+  'essential only', 'manage preferences', 'deny',
 ];
+
+/**
+ * Screens that are a gate in front of the app rather than the app itself, keyed
+ * by the vocabulary that identifies them. Used only to LABEL what was crossed —
+ * the actual forward move is still made by the generic affordance search, so no
+ * app-specific flow is encoded here.
+ */
+const GATE_SCREEN_KINDS: Array<{ kind: string; re: RegExp }> = [
+  { kind: 'language selection', re: /\b(?:select|choose|pick)\s+(?:your\s+)?language\b|\blanguage\b.{0,20}\b(?:selection|preference)\b|\bchoose\s+your\s+region\b/i },
+  { kind: 'cookie/consent notice', re: /\bcookies?\b|\bwe\s+use\s+cookies\b|\bconsent\b|\bgdpr\b|\bprivacy\s+(?:policy|preferences)\b|\btracking\s+preferences\b/i },
+  { kind: 'update prompt', re: /\bupdate\s+(?:available|now|required)\b|\bnew\s+version\b|\bupgrade\s+(?:now|available)\b|\bplease\s+update\b/i },
+  { kind: 'onboarding', re: /\bwelcome\b|\bget\s+started\b|\btutorial\b|\bwalkthrough\b|\bswipe\s+to\s+continue\b|\bhow\s+it\s+works\b/i },
+  { kind: 'rating prompt', re: /\brate\s+(?:us|this\s+app)\b|\benjoying\s+the\s+app\b|\bleave\s+a\s+review\b/i },
+  { kind: 'sign-in wall', re: /\bsign\s+in\s+to\s+continue\b|\blog\s+in\s+to\s+continue\b|\bcreate\s+an\s+account\s+to\b/i },
+];
+
+/** Name the kind of gate currently on screen, for an honest execution log. */
+export function classifyGateScreen(nodes: UiNode[]): string | null {
+  const text = nodes.map((n) => `${n.text} ${n.contentDesc}`).join(' ');
+  return GATE_SCREEN_KINDS.find((g) => g.re.test(text))?.kind ?? null;
+}
 
 /**
  * Resource-id fragments that reveal a control's intent when it has no visible
@@ -743,7 +937,20 @@ export function findForwardAffordance(
   const byIntent: Record<ForwardIntent, string[]> = {
     advance: ADVANCE_LABELS, grant: GRANT_LABELS, dismiss: DISMISS_LABELS,
   };
-  for (const intent of preferred) {
+
+  // On a consent or update prompt the "forward" control is the wrong one to
+  // take. "Accept all" on a cookie notice opts the session into tracking, and
+  // "Update now" leaves the Play Store installing a different build than the
+  // one under test — both would be chosen by the default advance-first order,
+  // because ADVANCE_LABELS contains "accept" and "ok". Declining is what leaves
+  // the app in the default state the sheet's remaining steps were written
+  // against, so on exactly these two gates dismissal is tried first.
+  const gate = classifyGateScreen(nodes);
+  const order = gate === 'cookie/consent notice' || gate === 'update prompt' || gate === 'rating prompt'
+    ? (['dismiss', 'advance', 'grant'] as ForwardIntent[])
+    : preferred;
+
+  for (const intent of order) {
     const node = matchTappable(nodes, byIntent[intent], intent);
     if (node) return { node, intent };
   }
@@ -825,6 +1032,23 @@ export async function ensureAppForeground(
    * whole point is to verify it.
    */
   avoidAds = true,
+  /**
+   * Permit the last-resort force-stop + cold start.
+   *
+   * DEFAULT FALSE, and that default is the whole point. This helper runs once
+   * per test case, and its final rung force-stops the process and cold-starts
+   * it. On any app that leaves the foreground by itself — an ad SDK tearing
+   * down its Activity, an OEM background killer, a share sheet that owns the
+   * window — that rung fired on case after case, so the app visibly closed and
+   * reopened throughout the run and every case restarted from the splash
+   * screen instead of continuing the session the sheet describes.
+   *
+   * A warm `am start` re-fronts the existing task and preserves app state,
+   * which is what "bring it back to the foreground" means. Killing the process
+   * is only correct when the process is already broken, so the engine passes
+   * true here exclusively after it has detected a genuine crash/ANR.
+   */
+  opts: { allowColdRestart?: boolean } = {},
 ): Promise<{ ok: boolean; recovered: boolean; detail: string; deviceLost?: boolean }> {
   // Distinguish "the cable dropped" from "the app moved". Without this a
   // disconnected device reads as an application defect on every remaining case.
@@ -848,9 +1072,8 @@ export async function ensureAppForeground(
     // apart from real content, which is exactly what let every case behind an
     // interstitial silently run against the ad instead of the app.
     if (avoidAds) {
-      const activity = await currentActivity(serial);
-      if (isAdActivity(activity)) {
-        const cleared = await escapeAdSurface(serial);
+      if (await adSurfacePresent(serial)) {
+        const cleared = await escapeAdSurface(serial, 5, pkg);
         return {
           ok: cleared.escaped, recovered: cleared.escaped,
           detail: `${cleared.detail}${dialogs.handled.length > 0 ? ` ${dialogs.handled.join('; ')}.` : ''}`,
@@ -875,26 +1098,42 @@ export async function ensureAppForeground(
   }
 
   if ((await foregroundPackage(serial)) === pkg) {
-    if (avoidAds && isAdActivity(await currentActivity(serial))) await escapeAdSurface(serial);
+    if (avoidAds && (await adSurfacePresent(serial))) await escapeAdSurface(serial, 5, pkg);
     return { ok: true, recovered: true, detail: `App had drifted to "${fg ?? 'unknown'}"; backed out of it and returned to the app.` };
   }
 
   const relaunch = await launchApp(serial, pkg, 20000);
   if ((await foregroundPackage(serial)) === pkg) {
-    if (avoidAds && isAdActivity(await currentActivity(serial))) await escapeAdSurface(serial);
+    if (avoidAds && (await adSurfacePresent(serial))) await escapeAdSurface(serial, 5, pkg);
     return {
       ok: true, recovered: true,
       detail: `App had drifted to "${fg ?? 'unknown'}" and was brought back to the foreground.${dialogs.crashed ? ' A crash/ANR dialog was cleared first.' : ''}`,
     };
   }
 
-  // Last resort: a cold start. A warm relaunch reuses the existing task, which
-  // stays broken if that task is what drifted (or was backed out of entirely);
-  // force-stopping first guarantees a clean process. Without this the run keeps
-  // going against whatever IS on screen — the launcher, a browser — and every
-  // remaining case reports garbage against the wrong app.
+  // A warm relaunch could not re-front the app. The only rung left is a cold
+  // start, which force-stops the process first — so it is gated: see the
+  // `allowColdRestart` docs above for why doing this per-case is exactly the
+  // open/close thrashing this engine must not produce.
+  if (!opts.allowColdRestart) {
+    const stillFg = await foregroundPackage(serial);
+    return {
+      ok: false,
+      recovered: false,
+      detail: `App is not in the foreground (currently "${stillFg ?? 'unknown'}") and a warm relaunch did not restore it (${relaunch.message}). The process was deliberately NOT force-stopped: restarting it would discard the session under test. A cold restart is only performed after a genuine crash is detected.`,
+    };
+  }
+
+  // Cold start. A warm relaunch reuses the existing task, which stays broken if
+  // that task is what drifted (or was backed out of entirely); force-stopping
+  // first guarantees a clean process.
   await stopApp(serial, pkg).catch(() => {});
-  await new Promise((r) => setTimeout(r, 800));
+  // Wait for the process to actually be gone rather than guessing 800ms —
+  // relaunching while it is still dying reuses the very task we force-stopped.
+  await waitForCondition(
+    async () => !(await shell(serial, `pidof ${pkg}`, 8000)).trim(),
+    { timeoutMs: 4000, pollMs: 150 },
+  );
   const cold = await launchApp(serial, pkg, 25000);
   const nowFg = await foregroundPackage(serial);
   const ok = nowFg === pkg;
@@ -1033,7 +1272,7 @@ function findIconAffordance(
  * in a scrollable container or sits among several similar siblings — never by
  * matching a specific app's option names.
  */
-function findSelectableChoice(nodes: UiNode[]): UiNode | null {
+export function findSelectableChoice(nodes: UiNode[]): UiNode | null {
   const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
   const scrollers = nodes.filter((n) => n.scrollable);
 
@@ -1171,23 +1410,62 @@ export function isAdActivity(activity: string | null): boolean {
 }
 
 /**
+ * Ad-vendor branding and creative artifacts, for the case an interstitial is
+ * rendered as an overlay INSIDE the app's own Activity rather than a separate
+ * AdActivity component — confirmed live: a real interstitial covered the
+ * screen while `mCurrentFocus` never left the app's own MainActivity, so
+ * `isAdActivity()` never fired and a genuine tap on the real UI underneath
+ * silently hit the ad instead. This is generic ad-industry vocabulary (test-ad
+ * labelling, ad-network branding, a raw tracking-URL left visible when a
+ * creative fails to render) — not anything specific to one app.
+ */
+const AD_CONTENT_RE = /\btest\s*ad\b|\bgoogle\s*ad(?:mob|s)\b|\bad\s*choices\b|%3F\w+%3D[\w%.-]*|^https?:\/\/\S|\bgclid\b|\butm_source\b|\binterstitial\b/i;
+
+/** Does the live screen show ad-vendor branding or creative artifacts? */
+function looksLikeAdCreative(nodes: UiNode[]): boolean {
+  return nodes.some((n) => AD_CONTENT_RE.test(`${n.text} ${n.contentDesc}`));
+}
+
+async function adSurfacePresent(serial: string): Promise<boolean> {
+  const [activity, nodes] = await Promise.all([currentActivity(serial), dumpUi(serial)]);
+  return isAdActivity(activity) || looksLikeAdCreative(nodes);
+}
+
+/**
  * Get a full-screen interstitial off the screen and confirm the app's own
  * activity is back in front, without ever tapping the ad's own creative.
  *
  * Bounded and patient: many ad SDKs only reveal their close/skip control after
  * a few seconds, so this retries a few times with a real pause rather than
- * giving up after one look — but it is only ever invoked when an ad activity
+ * giving up after one look — but it is only ever invoked when an ad surface
  * was genuinely detected, so it costs nothing on the (overwhelmingly common)
  * steps where no ad is showing.
  */
 export async function escapeAdSurface(
   serial: string,
   maxAttempts = 5,
+  /**
+   * The app under test. When given, BACK-presses are checked for collateral
+   * damage: an interstitial hosted on the app's own splash has nothing behind it
+   * yet, so BACK dismisses the ad by killing the APP. Without this the helper
+   * then found no ad on the launcher and cheerfully reported "Advertisement
+   * cleared", while the app it was protecting was gone — and the caller
+   * relaunched, drew another interstitial, pressed BACK again. That is a large
+   * part of why the app appeared to open and close over and over.
+   */
+  pkg?: string,
 ): Promise<{ escaped: boolean; detail: string }> {
   let sawAd = false;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const activity = await currentActivity(serial);
-    if (!isAdActivity(activity)) {
+    if (!(await adSurfacePresent(serial))) {
+      // No ad — but "no ad" is also what the launcher looks like. Only call it
+      // cleared if the app under test is what is actually on screen.
+      if (pkg && (await foregroundPackage(serial)) !== pkg) {
+        return {
+          escaped: false,
+          detail: `The advertisement is gone, but so is the app: dismissing it left "${pkg}" out of the foreground. The interstitial was most likely hosted on the app's own launch screen, where a back-press exits the app instead of closing the ad.`,
+        };
+      }
       return {
         escaped: true,
         detail: sawAd ? `Advertisement cleared after ${attempt} dismissal attempt(s).` : 'No advertisement was blocking the screen.',
@@ -1196,13 +1474,24 @@ export async function escapeAdSurface(
     sawAd = true;
     const dismissed = await dismissBlockingOverlay(serial, 1);
     if (dismissed.handled.length === 0) {
-      // No labelled close/skip control yet — back out rather than tap
-      // anywhere on the ad's own creative.
+      // No labelled close/skip control (often true — an interstitial's own X
+      // icon is frequently invisible to the accessibility tree even though it
+      // is visibly on screen). Back out rather than tap anywhere on the ad's
+      // own creative — BACK genuinely dismisses an interstitial that is layered
+      // over a running app.
       await pressKey(serial, 'KEYCODE_BACK');
+      // ...but stop immediately if that BACK took the app with it. Pressing it
+      // again would only keep exiting whatever the caller relaunches.
+      if (pkg && (await foregroundPackage(serial)) !== pkg) {
+        return {
+          escaped: false,
+          detail: `Backing out of the advertisement exited the app itself ("${pkg}" is no longer in the foreground), so no further back-presses were attempted. This interstitial is shown on the app's launch screen, which has nothing behind it to return to.`,
+        };
+      }
     }
     await new Promise((r) => setTimeout(r, 1200));
   }
-  const stillAd = isAdActivity(await currentActivity(serial));
+  const stillAd = await adSurfacePresent(serial);
   return {
     escaped: !stillAd,
     detail: stillAd
@@ -1274,6 +1563,63 @@ export function findNode(nodes: UiNode[], label: string, opts: { editable?: bool
   );
 }
 
+/**
+ * Wait for the control a step names to actually appear, instead of demanding it
+ * already be there.
+ *
+ * Element lookup used to be one-shot: dump the hierarchy once, and if the label
+ * was not in it, fail the step with "no on-screen element matching". That turns
+ * ordinary lateness — a list still binding, a dialog still animating in, a
+ * fragment committed a frame after the settle returned — into a reported defect,
+ * which is exactly the false failure a human tester would never file. They would
+ * look again for a moment before concluding the control is missing.
+ *
+ * Returns as soon as the element resolves, so the common case (already present)
+ * costs a single dump and no extra delay. Only genuinely absent controls pay the
+ * full timeout, and those are the ones that deserve to fail.
+ */
+export async function waitForElement(
+  serial: string,
+  label: string,
+  opts: { editable?: boolean; clickable?: boolean; timeoutMs?: number } = {},
+): Promise<{ node: UiNode | null; nodes: UiNode[]; waitedMs: number }> {
+  const timeoutMs = opts.timeoutMs ?? 6000;
+  const started = Date.now();
+
+  // First look uses the cache: the caller has usually just settled the screen,
+  // so re-dumping immediately would pay ~2.2s to learn nothing new.
+  let nodes = await dumpUi(serial);
+  let node = findNode(nodes, label, opts);
+
+  // Each retry IS a fresh ~2.2s dump, so the dump latency provides the spacing;
+  // an added sleep would only idle.
+  while (!node && Date.now() - started < timeoutMs) {
+    // An interstitial can appear AFTER the caller's pre-step ad escape, part way
+    // through this wait. Sitting out the full timeout against an ad wastes the
+    // budget and then reports the ad's own creative as "the visible elements",
+    // which reads as an app defect. Bail out immediately so the caller's
+    // ad-escape-and-retry path runs while the wait budget is still useful.
+    if (looksLikeAdCreative(nodes)) break;
+    nodes = await dumpUi(serial, { fresh: true });
+    node = findNode(nodes, label, opts);
+  }
+
+  return { node, nodes, waitedMs: Date.now() - started };
+}
+
+/**
+ * Does this screen expose no readable content at all?
+ *
+ * Everything here resolves elements from the accessibility tree. A surface drawn
+ * straight to a canvas (a game, some Flutter/Unity builds, a video player) can
+ * be fully populated visually while exposing nothing to uiautomator. Reporting
+ * that as "the element is missing" blames the app for a harness limitation, so
+ * callers use this to say plainly that the screen is unreadable instead.
+ */
+export function isTreeUnreadable(nodes: UiNode[]): boolean {
+  return nodes.length === 0 || nodes.every((n) => !n.text && !n.contentDesc && !n.resourceId);
+}
+
 // --------------------------------------------------------------------- input
 
 // Every input below changes what is on screen, so each drops the cached
@@ -1342,12 +1688,43 @@ export async function detectCrashes(serial: string, pkg: string | null): Promise
   const fatalIdx = lines.findIndex((l) => /FATAL EXCEPTION|AndroidRuntime.*(FATAL|E\/)/i.test(l));
   if (fatalIdx >= 0) {
     const block = lines.slice(fatalIdx, fatalIdx + 15).join('\n');
-    if (!pkg || block.includes(pkg) || fatalIdx >= 0) signals.push({ type: 'crash', detail: block.trim() });
+    // Attribute the crash to the app under test only when its package actually
+    // appears in the trace. The previous condition ended in `|| fatalIdx >= 0`,
+    // which is unconditionally true inside this branch — so the `pkg` filter
+    // never filtered anything and any unrelated process dying (a system
+    // service, another app, the launcher) was reported as this app's crash.
+    // That matters more now: a crash is what authorises a cold restart, so a
+    // foreign crash would restart a perfectly healthy app under test.
+    if (!pkg || block.includes(pkg)) signals.push({ type: 'crash', detail: block.trim() });
   }
-  const anrLine = lines.find((l) => /ANR in|Application Not Responding/i.test(l));
+  // Same attribution rule for ANRs: "ANR in com.other.app" is not our defect.
+  const anrLine = lines.find((l) => /ANR in|Application Not Responding/i.test(l)
+    && (!pkg || l.includes(pkg)));
   if (anrLine) signals.push({ type: 'anr', detail: anrLine.trim() });
 
   return signals;
+}
+
+/**
+ * Stable identity for a crash signal, so the same crash is not acted on twice.
+ *
+ * `detectCrashes` reads a trailing window of the log and never clears it, so one
+ * FATAL EXCEPTION keeps reappearing on every subsequent call for the rest of the
+ * run. Anything that *reacts* to a crash — restarting the app, failing a step,
+ * filing a bug — therefore has to remember which signals it has already seen, or
+ * a single crash restarts the app on every step from then on.
+ *
+ * Keyed on the exception's own first lines rather than the whole block, because
+ * the block's trailing context shifts as new log lines arrive.
+ */
+export function crashSignature(signal: CrashSignal): string {
+  const head = signal.detail
+    .split('\n')
+    .slice(0, 3)
+    // Timestamps and pids differ between reads of the same crash.
+    .map((l) => l.replace(/^\s*\d[\d\-:. ]*/, '').replace(/\b\d{2,}\b/g, '#').trim())
+    .join(' | ');
+  return `${signal.type}:${head}`;
 }
 
 // --------------------------------------------------------------- Play Store

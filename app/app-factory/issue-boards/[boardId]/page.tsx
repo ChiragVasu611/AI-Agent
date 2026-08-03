@@ -23,6 +23,20 @@ import {
 } from '@/lib/issue-boards/constants';
 import { cn } from '@/lib/utils';
 
+/**
+ * A left-edge accent bar keyed by severity — the same at-a-glance triage cue
+ * Jira/Linear-style Kanban cards use, so the most severe issues in a column
+ * are visually distinct before reading any badge text. Written as complete,
+ * literal class strings (not built by concatenating a colour name) so
+ * Tailwind's static scanner can actually find them.
+ */
+const SEVERITY_ACCENT: Record<string, string> = {
+  critical: 'border-l-4 border-l-destructive',
+  high: 'border-l-4 border-l-orange-500',
+  medium: 'border-l-4 border-l-amber-500',
+  low: 'border-l-4 border-l-border',
+};
+
 interface KanbanCard {
   id: string;
   issueKey: string;
@@ -277,7 +291,7 @@ export default function IssueBoardPage({ params }: { params: { boardId: string }
                 onDragLeave={() => setDragOverColumn((c) => (c === col.key ? null : c))}
                 onDrop={(e) => { e.preventDefault(); handleDrop(col.key, null); }}
                 className={cn(
-                  'flex w-[300px] shrink-0 flex-col rounded-xl border bg-card/40 backdrop-blur transition',
+                  'flex w-[300px] shrink-0 flex-col rounded-xl border bg-muted/30 shadow-sm backdrop-blur transition',
                   dragOverColumn === col.key ? 'border-primary/60 bg-primary/5' : 'border-border',
                 )}
               >
@@ -304,8 +318,9 @@ export default function IssueBoardPage({ params }: { params: { boardId: string }
                         onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOverColumn(col.key); }}
                         onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleDrop(col.key, card.id); }}
                         className={cn(
-                          'cursor-grab rounded-lg border border-border bg-card p-2.5 shadow-sm transition active:cursor-grabbing',
-                          'hover:border-primary/50 hover:shadow-md',
+                          'cursor-grab rounded-lg border border-border bg-card p-2.5 shadow-sm transition-all active:cursor-grabbing',
+                          'hover:-translate-y-0.5 hover:border-primary/50 hover:shadow-md',
+                          SEVERITY_ACCENT[card.severity],
                           draggingId === card.id && 'opacity-40',
                         )}
                       >
