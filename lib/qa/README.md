@@ -52,12 +52,26 @@ updates the `QaTestRun` document; the UI reflects that via polling.
 
 ## Entry points & routing
 
-| Target | Submit path | Engine chosen |
+**There is no simulated engine.** Every run either executes against the real
+target or terminates as `blocked` with the precise reason. `resolveRuntime()` in
+`lib/qa/runtime-support.ts` makes that decision by probing the host and the
+attached hardware; `finalizeBlockedRun()` records the honest terminal state.
+
+| Target | Submit path | Outcome |
 |---|---|---|
-| **Web URL** (`http(s)://…`) | `startTestExecution` server action (`app/qa/actions.ts`) | `runWebTestExecution` — **real** (Playwright) |
+| **Web URL** (`http(s)://…`) | `startTestExecution` (`app/qa/actions.ts`) | `runWebTestExecution` — **real** (Playwright) |
+| **Installed app + connected device** | `startInstalledAppExecution` | `runAndroidDeviceExecution` — **real** (ADB) |
 | **Android APK + connected device** | `POST /api/qa/runs/start-binary` | `runAndroidDeviceExecution` — **real** (ADB) |
-| **APK without device / AAB / IPA / store URLs / mobile file names** | either path | `runQaTestExecution` — **simulated** (AI) |
 | **Uploaded test-case sheet** (`.xlsx`/`.csv`) | `mode=uploaded` | `runUploadedTestExecution` |
+| **APK with no device attached** | either path | `blocked_no_runtime` |
+| **AAB** (needs bundletool) | either path | `runtime_unavailable` |
+| **Play Store URL** (no installable binary) | either path | `blocked_no_runtime` |
+| **IPA / App Store URL** | either path | `unsupported_platform` — no iOS driver exists |
+| **Flutter / desktop / unknown** | either path | `unsupported_platform` |
+
+A blocked run stores **no** test-case rows, bugs, screenshots or QA score, and
+its pass/fail counters stay at zero so it can never be averaged into a success
+rate. The reason and the remediation steps are written to the run log.
 
 Binary uploads use a **Route Handler** rather than a Server Action because this
 Next.js version (13.5.1) hard-caps Server Action bodies at 1 MB — far too small for a

@@ -14,10 +14,13 @@ import { QaIssueBoard } from '@/lib/mongodb/models/QaIssueBoard';
 import { QaIssueCard } from '@/lib/mongodb/models/QaIssueCard';
 import { User } from '@/lib/mongodb/models/User';
 import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
-import { runQaTestExecution } from '@/lib/qa/engine';
 import { runWebTestExecution } from '@/lib/qa/web-engine';
+import { runAndroidDeviceExecution } from '@/lib/qa/android-engine';
+import { resolveRuntime, isBlocked } from '@/lib/qa/runtime-support';
+import { finalizeBlockedRun } from '@/lib/qa/blocked-run';
 import { runUploadedTestExecution } from '@/lib/qa/uploadedEngine';
 import { nextRunNumber } from '@/lib/qa/run-number';
+import { getEvidenceStore, runPrefix } from '@/lib/qa/evidence/store';
 
 /**
  * Re-run always creates a brand-new QaTestRun document against the same
@@ -80,11 +83,28 @@ export async function rerunQaTestRun(runId: string) {
     }
     runUploadedTestExecution(String(newRun._id), apiKey).catch((e) => console.error('QA re-run (uploaded) error', e));
   } else {
-    const isRealBrowserTarget = project.platform === 'web' && /^https?:\/\//i.test(project.sourceRef);
-    const execution = isRealBrowserTarget
-      ? runWebTestExecution(String(newRun._id))
-      : runQaTestExecution(String(newRun._id), apiKey);
-    execution.catch((e) => console.error('QA re-run error', e));
+    // A re-run is resolved against the runtime available NOW, not the one the
+    // original run used: the device may be gone, or newly attached. If nothing
+    // can execute the target, the re-run terminates as BLOCKED rather than
+    // producing estimated results.
+    const decision = await resolveRuntime(project.sourceType, project.sourceRef, {
+      binaryPath: project.binaryPath ?? null,
+      requestedSerial: original.deviceSerial ?? null,
+    });
+
+    if (isBlocked(decision)) {
+      newRun.engineMode = decision.kind;
+      await newRun.save();
+      await finalizeBlockedRun(String(newRun._id), decision);
+    } else {
+      newRun.engineMode = decision.engine === 'web_browser' ? 'real_browser' : 'real_device';
+      if (decision.serial) newRun.deviceSerial = decision.serial;
+      await newRun.save();
+      const execution = decision.engine === 'web_browser'
+        ? runWebTestExecution(String(newRun._id))
+        : runAndroidDeviceExecution(String(newRun._id), decision.serial as string);
+      execution.catch((e) => console.error('QA re-run error', e));
+    }
   }
 
   revalidatePath('/qa/runs');
@@ -131,6 +151,21 @@ export async function deleteQaTestRun(runId: string) {
 
   const run = await QaTestRun.findOne({ _id: runId, userId: user.id });
   if (!run) return { error: 'Run not found.' };
+
+  // Stored evidence lives outside the database, so deleting the documents alone
+  // would orphan the bytes on disk / in the bucket forever. Sweep the run's whole
+  // key prefix. Best-effort: a storage failure must not block deleting the run.
+  try {
+    const store = await getEvidenceStore();
+    const removed = await store.deletePrefix(runPrefix(runId));
+    if (removed > 0) {
+      // eslint-disable-next-line no-console
+      console.info(`QA: removed ${removed} stored evidence object(s) for run ${runId}`);
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('QA: could not remove stored evidence for run', runId, (e as Error)?.message);
+  }
 
   await Promise.all([
     QaBug.deleteMany({ runId }),

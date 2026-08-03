@@ -26,6 +26,8 @@ const STATUS_BADGE: Record<string, string> = {
   failed: 'bg-destructive/15 text-destructive',
   partial: 'bg-amber-500/15 text-amber-500',
   cancelled: 'bg-secondary text-muted-foreground',
+  // Never executed — deliberately not styled like a failure or a pass.
+  blocked: 'bg-amber-500/15 text-amber-600 border border-amber-500/30',
 };
 
 const MODULE_TYPE_OPTIONS = [

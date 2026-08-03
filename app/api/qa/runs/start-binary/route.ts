@@ -6,9 +6,11 @@ import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { QaUploadedTestCase } from '@/lib/mongodb/models/QaUploadedTestCase';
 import { User } from '@/lib/mongodb/models/User';
 import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
-import { runQaTestExecution } from '@/lib/qa/engine';
 import { runUploadedTestExecution } from '@/lib/qa/uploadedEngine';
 import { runAndroidDeviceExecution } from '@/lib/qa/android-engine';
+import { runWebTestExecution } from '@/lib/qa/web-engine';
+import { resolveRuntime, isBlocked } from '@/lib/qa/runtime-support';
+import { finalizeBlockedRun } from '@/lib/qa/blocked-run';
 import { parseTestCaseFile } from '@/lib/qa/testCaseParser';
 import { DEFAULT_SMOKE_MODULES } from '@/lib/qa/modules';
 import { PLATFORM_BY_SOURCE, BINARY_SOURCE_TYPES, handleAppFileUpload } from '@/lib/qa/app-upload';
@@ -159,50 +161,56 @@ export async function POST(req: Request) {
   const modulesRaw = formData.getAll('modules').map(String);
   const modules = modulesRaw.length > 0 ? modulesRaw : DEFAULT_SMOKE_MODULES;
 
-  // Decide whether this run can execute on a REAL connected Android device.
-  // Only a genuine .apk can be installed directly via `adb install` (an .aab
-  // needs bundletool), so real-device execution is limited to APKs with a
-  // stored binary and at least one online device.
-  const requestedDeviceId = String(formData.get('deviceId') ?? '').trim();
-  let targetSerial: string | null = null;
-  if (sourceType === 'apk' && upload.binaryPath) {
-    try {
-      if (requestedDeviceId && requestedDeviceId !== 'simulated') {
-        const online = (await listDevices()).find((d) => d.id === requestedDeviceId && d.status === 'online');
-        targetSerial = online?.id ?? null;
-      } else if (requestedDeviceId !== 'simulated') {
-        const online = await firstOnlineDevice();
-        targetSerial = online?.id ?? null;
-      }
-    } catch (e) {
-      console.error('QA start-binary: device lookup failed, falling back to simulated', e);
-    }
-  }
+  // Resolve how this target can ACTUALLY execute by probing the host and the
+  // attached hardware. There is no simulated fallback: an APK with no device, an
+  // .aab without bundletool, or an IPA all terminate as BLOCKED with the reason.
+  const requestedDeviceId = String(formData.get('deviceId') ?? '').trim() || null;
+  const decision = await resolveRuntime(sourceType, upload.sourceRef, {
+    binaryPath: upload.binaryPath ?? null,
+    requestedSerial: requestedDeviceId,
+  });
 
   const run = await QaTestRun.create({
     userId: user.id,
     projectId: project._id,
     modules,
     status: 'queued',
-    engineMode: targetSerial ? 'real_device' : 'simulated',
+    engineMode: isBlocked(decision)
+      ? decision.kind
+      : (decision.engine === 'web_browser' ? 'real_browser' : 'real_device'),
     runNumber,
     runName: `${name} Run #${runNumber}`,
     buildVersion,
     executedByName: user.fullName || user.email,
-    deviceSerial,
+    deviceSerial: isBlocked(decision) ? deviceSerial : (decision.serial ?? deviceSerial),
   });
 
   await ActivityLog.create({
-    userId: user.id, action: 'qa.run.start', entity: 'qa_test_run', entityId: String(run._id), meta: { name, modules, engine: targetSerial ? 'real_device' : 'simulated' },
+    userId: user.id,
+    action: 'qa.run.start',
+    entity: 'qa_test_run',
+    entityId: String(run._id),
+    meta: { name, modules, engine: isBlocked(decision) ? decision.kind : decision.engine },
   });
 
-  if (targetSerial) {
-    // Real device: install + launch + capture genuine screenshots + logcat crash scan.
-    runAndroidDeviceExecution(String(run._id), targetSerial).catch((e) => console.error('QA real-device execution error', e));
-  } else {
-    // No connected device (or non-APK) — fall back to the simulated engine.
-    runQaTestExecution(String(run._id), apiKey).catch((e) => console.error('QA execution error', e));
+  if (isBlocked(decision)) {
+    await finalizeBlockedRun(String(run._id), decision);
+    return NextResponse.json({
+      runId: String(run._id),
+      engine: decision.kind,
+      blocked: true,
+      reason: decision.reason,
+      remediation: decision.remediation,
+    }, { status: 200 });
   }
 
-  return NextResponse.json({ runId: String(run._id), engine: targetSerial ? 'real_device' : 'simulated' });
+  if (decision.engine === 'web_browser') {
+    runWebTestExecution(String(run._id)).catch((e) => console.error('QA web execution error', e));
+  } else {
+    // Real device: install + launch + capture genuine screenshots + logcat crash scan.
+    runAndroidDeviceExecution(String(run._id), decision.serial as string)
+      .catch((e) => console.error('QA real-device execution error', e));
+  }
+
+  return NextResponse.json({ runId: String(run._id), engine: decision.engine, blocked: false });
 }

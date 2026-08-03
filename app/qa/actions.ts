@@ -7,8 +7,9 @@ import { QaProject } from '@/lib/mongodb/models/QaProject';
 import { QaTestRun } from '@/lib/mongodb/models/QaTestRun';
 import { User } from '@/lib/mongodb/models/User';
 import { ActivityLog } from '@/lib/mongodb/models/ActivityLog';
-import { runQaTestExecution } from '@/lib/qa/engine';
 import { runWebTestExecution } from '@/lib/qa/web-engine';
+import { resolveRuntime, isBlocked } from '@/lib/qa/runtime-support';
+import { finalizeBlockedRun } from '@/lib/qa/blocked-run';
 import { runUploadedTestExecution } from '@/lib/qa/uploadedEngine';
 import { runAndroidDeviceExecution } from '@/lib/qa/android-engine';
 import { listDevices, isPackageInstalled } from '@/lib/qa/adb';
@@ -81,17 +82,28 @@ export async function startTestExecution(formData: FormData) {
     userId: user.id, action: 'qa.run.start', entity: 'qa_test_run', entityId: String(run._id), meta: { name, modules },
   });
 
-  const dbUser = await User.findById(user.id).lean<{ qaOpenRouterApiKey: string | null }>();
-  const apiKey = dbUser?.qaOpenRouterApiKey ?? null;
+  // Decide how this target can ACTUALLY be executed, by probing the host and the
+  // attached hardware. There is no fallback that estimates results: a target the
+  // platform cannot drive terminates as BLOCKED with the reason and remediation.
+  const decision = await resolveRuntime(sourceType, sourceRef, { requestedSerial: deviceSerial });
 
-  const isRealBrowserTarget = PLATFORM_BY_SOURCE[sourceType] === 'web' && /^https?:\/\//i.test(sourceRef);
+  if (isBlocked(decision)) {
+    run.engineMode = decision.kind;
+    await run.save();
+    await finalizeBlockedRun(String(run._id), decision);
+    revalidatePath('/qa');
+    revalidatePath('/qa/test-execution');
+    return { runId: String(run._id), blocked: decision.kind, reason: decision.reason };
+  }
 
-  // Fire-and-forget; the client polls the run for live status. Web URLs get a real
-  // headless-Chromium execution; there's no real device farm for mobile/store sources,
-  // so those stay on the honestly-labeled simulated engine.
-  const execution = isRealBrowserTarget
+  run.engineMode = decision.engine === 'web_browser' ? 'real_browser' : 'real_device';
+  if (decision.serial) run.deviceSerial = decision.serial;
+  await run.save();
+
+  // Fire-and-forget; the client polls the run for live status.
+  const execution = decision.engine === 'web_browser'
     ? runWebTestExecution(String(run._id))
-    : runQaTestExecution(String(run._id), apiKey);
+    : runAndroidDeviceExecution(String(run._id), decision.serial as string);
   execution.catch((e) => console.error('QA execution error', e));
 
   revalidatePath('/qa');
