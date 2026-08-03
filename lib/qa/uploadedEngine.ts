@@ -374,7 +374,13 @@ async function runOnAndroidDevice(
     }
   }
 
-  if (!prep.ready) {
+  // A HARD preparation failure (no binary, cannot install, no package name, an
+  // .aab, the device gone) genuinely leaves nothing to execute against, so the
+  // sheet is blocked. A RECOVERABLE one — installed and launched, readiness not
+  // confirmed — must not block anything: the engine re-anchors the app before
+  // every case, so a genuinely broken app fails case by case with evidence
+  // instead of the whole sheet being written off before step 1.
+  if (!prep.ready && !prep.recoverable) {
     if (prep.screenshot) {
       await QaScreenshot.create({
         runId, screenName: 'Preparation failed', testStep: 'Preparation', imageDataUrl: prep.screenshot,
@@ -386,7 +392,15 @@ async function runOnAndroidDevice(
     return;
   }
 
-  await log(runId, 'automation', 'info', `Application is running on ${deviceLabel}. Starting execution of ${cases.length} test case(s).`);
+  if (!prep.ready && prep.recoverable) {
+    await log(runId, 'automation', 'warn',
+      `The application did not confirm it was ready (${prep.blockedReason}). It is installed and launchable, so execution is starting anyway — `
+      + 'each test case re-checks the app first, and any case that genuinely cannot run will be reported on its own with evidence.');
+  }
+
+  await log(runId, 'automation', 'info', prep.ready
+    ? `Application is running on ${deviceLabel}. Starting execution of ${cases.length} test case(s).`
+    : `Starting execution of ${cases.length} test case(s) on ${deviceLabel}; the app will be brought to the foreground before each one.`);
 
   // 3. Execute the sheet against the live app.
   let totals;

@@ -671,6 +671,10 @@ export async function waitForAppReady(
   // attempt distinguishes a recoverable drift from a genuinely dead launch;
   // repeating it just fights the thing that is killing the app.
   let relaunched = false;
+  // Ad-escape attempts made while waiting for readiness. Bounded so an ad that
+  // reappears on every relaunch cannot drive an endless exit/relaunch cycle.
+  const MAX_AD_ESCAPES = 2;
+  let adEscapes = 0;
 
   while (Date.now() - started < timeoutMs) {
     const settle = await waitForUiSettle(serial, { timeoutMs: 6000 });
@@ -739,7 +743,31 @@ export async function waitForAppReady(
     // live that the latter happens on this exact app and leaves the
     // Activity name unchanged, so relying on the name alone missed it.
     if (isAdActivity(activity) || looksLikeAdCreative(settle.nodes)) {
-      await escapeAdSurface(serial, 2, pkg);
+      // Bounded. Escaping an interstitial that sits on the app's LAUNCH screen
+      // has nothing behind it to return to, so the back-press exits the app;
+      // the loop below then relaunches, the ad is served again, and the cycle
+      // repeats — the app visibly opening and closing until this whole function
+      // times out and reports the launch dead. Confirmed live on a real app
+      // whose AdMob interstitial appears ~9s after a first-run launch.
+      adEscapes += 1;
+      const escape = await escapeAdSurface(serial, 2, pkg);
+
+      if (!escape.escaped && adEscapes >= MAX_AD_ESCAPES) {
+        // Stop fighting it. The app is installed, launched and alive — an ad on
+        // the launch screen is an honest condition, not a failed launch. Put the
+        // app back if the escape took it away, then declare it ready and let the
+        // per-step ad handling deal with the interstitial, which prefers the
+        // ad's own labelled close control over a destructive back-press.
+        if (launchActivity && (await foregroundPackage(serial)) !== pkg) {
+          await shell(serial, `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n ${launchActivity}`, 30000).catch(() => '');
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+        return {
+          ready: true,
+          activity: await currentActivity(serial),
+          detail: `The app launched and is running, with an advertisement on its launch screen. ${escape.detail} Execution will start and each step dismisses the ad using its own close control rather than a back-press.`,
+        };
+      }
       continue;
     }
 

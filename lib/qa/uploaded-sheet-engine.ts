@@ -170,6 +170,22 @@ export async function executeAndroidSuite(opts: {
   // and never clears it, so one FATAL EXCEPTION reappears on every subsequent
   // call — without this, a single early crash would restart the app on every
   // step for the rest of the suite and file the same bug over and over.
+  /**
+   * Set once we learn that escaping an advertisement EXITS this particular app.
+   *
+   * escapeAdSurface falls back to a back-press when an interstitial exposes no
+   * labelled close control. On an app whose interstitial sits on its launch
+   * screen there is nothing behind it, so that back-press closes the app —
+   * and because the engine called it again on the very next step, the app was
+   * pushed out over and over. Confirmed live: every step of a run reported
+   * "the advertisement is gone, but so is the app".
+   *
+   * Once observed, ad escaping is disabled for the rest of the run and only the
+   * NON-destructive path is used (dismissBlockingOverlay, which taps the ad's
+   * own close/skip control and never presses back).
+   */
+  let adEscapeExitsApp = false;
+
   const seenCrashes = new Set<string>();
   const newCrashes = async (): Promise<CrashSignal[]> => {
     const found = await detectCrashes(serial, pkg).catch(() => [] as CrashSignal[]);
@@ -326,15 +342,25 @@ export async function executeAndroidSuite(opts: {
       // the SAME task, preserving where the sheet had got to.
       let anchor = await refocusApp(serial, pkg, !isAdCase);
 
-      // A warm re-front cannot rescue a process that died. Check whether that is
-      // what happened, and only then restart — this is the sole restart path.
+      // A warm re-front cannot rescue a process that died, nor an app that has
+      // been pushed out to the launcher and will not come back. Either way the
+      // alternative is reporting the case BLOCKED having executed nothing, so a
+      // cold restart is authorised here — ONCE, at the start of a case, never
+      // per step.
+      //
+      // That bound is the whole point. The original defect was a force-stop on
+      // every re-anchor, which made the app visibly open and close throughout a
+      // run; one restart for a case that would otherwise be unrunnable is a
+      // different thing, and it is logged so it is never invisible.
       if (!anchor.ok && !anchor.deviceLost) {
         const crashed = await newCrashes();
-        if (crashed.length > 0) {
-          await log(runId, 'automation', 'warn',
-            `[${tc.testCaseId}] The app under test ${crashed[0].type === 'crash' ? 'crashed' : 'stopped responding (ANR)'} — restarting it, which is the only condition that authorises a restart.`);
-          anchor = await recoverFromCrash(serial, pkg, !isAdCase);
-        }
+        const why = crashed.length > 0
+          ? `the app ${crashed[0].type === 'crash' ? 'crashed' : 'stopped responding (ANR)'}`
+          : 'the app could not be brought back to the foreground';
+        await log(runId, 'automation', 'warn',
+          `[${tc.testCaseId}] Restarting the app once before this test case because ${why}. `
+          + 'Without this the case could not run at all; the session is otherwise kept for the whole suite.');
+        anchor = await recoverFromCrash(serial, pkg, !isAdCase);
       }
 
       if (anchor.recovered || !anchor.ok) {
@@ -496,7 +522,14 @@ export async function executeAndroidSuite(opts: {
       // app's own package, so plain package-based checks never catch it. Only
       // checked when this case is not itself testing ad behaviour.
       if (!isAdCase) {
-        const adEscape = await escapeAdSurface(serial, 5, pkg ?? undefined).catch(() => ({ escaped: true, detail: '' }));
+        const adEscape = adEscapeExitsApp
+          ? { escaped: true, detail: '' }
+          : await escapeAdSurface(serial, 5, pkg ?? undefined).catch(() => ({ escaped: true, detail: '' }));
+        if (!adEscape.escaped && /no longer in the foreground|but so is the app/i.test(adEscape.detail)) {
+          adEscapeExitsApp = true;
+          await log(runId, 'automation', 'warn',
+            `[${tc.testCaseId}] Dismissing this app's advertisement closes the app itself, so back-press ad escaping is disabled for the rest of this run; only the ad's own close control will be used.`);
+        }
         if (!adEscape.escaped) {
           await log(runId, 'automation', 'warn', `[${tc.testCaseId}] Step ${si + 1}: ${adEscape.detail}`);
         } else if (adEscape.detail && !adEscape.detail.startsWith('No advertisement')) {
@@ -538,7 +571,10 @@ export async function executeAndroidSuite(opts: {
         // step's tap surfaced. Clear it and retry once, same discipline as
         // the overlay case above.
         if (!exec.ok && !retried && !isAdCase) {
-          const adEscape = await escapeAdSurface(serial, 5, pkg ?? undefined).catch(() => ({ escaped: true, detail: '' }));
+          const adEscape = adEscapeExitsApp
+            ? { escaped: true, detail: '' }
+            : await escapeAdSurface(serial, 5, pkg ?? undefined).catch(() => ({ escaped: true, detail: '' }));
+          if (!adEscape.escaped && /no longer in the foreground|but so is the app/i.test(adEscape.detail)) adEscapeExitsApp = true;
           if (adEscape.detail && !adEscape.detail.startsWith('No advertisement')) {
             await log(runId, 'automation', 'warn', `[${tc.testCaseId}] Step ${si + 1} initially failed; ${adEscape.detail} Retrying.`);
             exec = await executeAndroidStep(serial, action, pkg);
@@ -770,7 +806,7 @@ export async function executeAndroidSuite(opts: {
       // An ad/promo overlay must never be mistaken for the genuine expected
       // result screen.
       await dismissBlockingOverlay(serial).catch(() => null);
-      if (!isAdCase) await escapeAdSurface(serial, 5, pkg ?? undefined).catch(() => null);
+      if (!isAdCase && !adEscapeExitsApp) await escapeAdSurface(serial, 5, pkg ?? undefined).catch(() => null);
       // The app may have left the foreground between the last step and this
       // assertion — some apps self-exit after an interstitial. Re-front it
       // WARMLY so the expectation is read against the app rather than the home

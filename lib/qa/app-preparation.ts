@@ -34,6 +34,27 @@ export interface PreparationResult {
   pendingScreenshot?: Promise<string | null>;
   /** Present only when ready === false. */
   blockedReason?: string;
+  /**
+   * `ready: false` but the app IS installed and launchable — only its readiness
+   * could not be positively confirmed.
+   *
+   * These two situations were previously indistinguishable, and both took the
+   * same path: blockAll(), marking every test case in the sheet BLOCKED before a
+   * single step ran. That is wildly disproportionate for the common case that
+   * causes it — an app that bounces to the launcher once during first-run
+   * startup (ad SDK init, an OEM background killer, a permission activity
+   * closing) and is perfectly usable a second later.
+   *
+   * Observed on a real 105MB app: install succeeded, launch succeeded, the app
+   * dropped to the launcher mid-startup, and all three test cases were reported
+   * BLOCKED with 0% progress having executed nothing.
+   *
+   * When this is true the caller should PROCEED with execution: the engine
+   * re-anchors the app before every case and every step reports its own verdict,
+   * so a genuinely dead app still fails honestly — case by case, with evidence —
+   * instead of the whole sheet being written off up front.
+   */
+  recoverable?: boolean;
 }
 
 /**
@@ -212,6 +233,25 @@ async function finishLaunch(
   const launch = await launchApp(serial, pkg);
   await emit(steps, report, step('Launch application', launch.ok, launch.message));
   if (!launch.ok) {
+    // The app is installed and its launcher activity resolved — what failed is
+    // the READINESS confirmation. That is recoverable, so preparation reports it
+    // as a warning and execution continues; blocking the entire sheet here means
+    // the user gets nothing at all from an app that is very often fine by the
+    // time the first step runs.
+    const installed = await isPackageInstalled(serial, pkg).catch(() => false);
+    if (installed) {
+      await emit(steps, report, step('Confirm app is loaded', false,
+        `${launch.message} Execution will start anyway and re-check the app before each test case, so any genuine failure is reported per test case with evidence rather than blocking the whole sheet.`));
+      return {
+        ready: false,
+        recoverable: true,
+        steps,
+        packageName: pkg,
+        screenshot: null,
+        pendingScreenshot: captureDeviceScreen(serial).catch(() => null),
+        blockedReason: launch.message,
+      };
+    }
     return { ready: false, steps, packageName: pkg, screenshot: await captureDeviceScreen(serial), blockedReason: launch.message };
   }
 
