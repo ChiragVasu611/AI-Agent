@@ -365,6 +365,9 @@ async function runOnAndroidDevice(
       project.appPackageName ?? null,
       project.sourceFileName ?? sourceRef,
       reportPrep,
+      // Parsed from the APK at upload time. Lets preparation skip re-pushing a
+      // build the device already has — the longest single step of a run.
+      project.appVersionCode ?? null,
     );
 
   // The Play Store path does not stream, so replay its trail (the APK path

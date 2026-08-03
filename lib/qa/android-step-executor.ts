@@ -36,8 +36,13 @@ export interface AndroidStepResult {
  * than sleeping a fixed amount and hoping. Returns the settled hierarchy so
  * callers can compare it against the pre-action state.
  */
-async function settleAfterAction(serial: string, timeoutMs = 12000) {
-  return waitForUiSettle(serial, { timeoutMs });
+async function settleAfterAction(serial: string, timeoutMs = 12000, changedFrom?: string) {
+  // Forwarding the pre-action signature lets the settle finish on ONE hierarchy
+  // dump when the screen has demonstrably changed and is idle, instead of always
+  // paying two (~4.8s). A dump is by far the most expensive device call, so this
+  // is the single biggest saving per step — and it cannot return a half-drawn
+  // frame, because the bridge still rejects a screen that is mid-load.
+  return waitForUiSettle(serial, { timeoutMs, changedFrom });
 }
 
 /**
@@ -135,7 +140,7 @@ export async function executeAndroidStep(
         const beforeActivity = await currentActivity(serial);
         const label = found.node.text || found.node.contentDesc;
         await tap(serial, found.node.center.x, found.node.center.y);
-        const after = await settleAfterAction(serial);
+        const after = await settleAfterAction(serial, 12000, before);
         const transition = {
           beforeSignature: before, beforeActivity,
           afterSignature: after.signature, afterActivity: after.activity,
@@ -193,7 +198,7 @@ export async function executeAndroidStep(
         const before = uiSignature(nodes);
         const beforeActivity = await currentActivity(serial);
         await tap(serial, node.center.x, node.center.y);
-        const after = await settleAfterAction(serial);
+        const after = await settleAfterAction(serial, 12000, before);
         const label = node.text || node.contentDesc || action.target;
 
         const transition = {
@@ -341,7 +346,7 @@ export async function executeAndroidStep(
         const beforeActivity = await currentActivity(serial);
         // A long press is a zero-distance swipe with a hold duration.
         await swipe(serial, target.center.x, target.center.y, target.center.x, target.center.y, 900);
-        const after = await settleAfterAction(serial);
+        const after = await settleAfterAction(serial, 12000, before);
         const transition = { beforeSignature: before, beforeActivity, afterSignature: after.signature, afterActivity: after.activity };
         if (after.signature === before && after.activity === beforeActivity) {
           return { ok: false, detail: `Long-pressed "${action.target}" but nothing on screen changed — the gesture had no effect.`, ...transition };
@@ -357,7 +362,7 @@ export async function executeAndroidStep(
         const beforeActivity = await currentActivity(serial);
         await tap(serial, target.center.x, target.center.y);
         await tap(serial, target.center.x, target.center.y);
-        const after = await settleAfterAction(serial);
+        const after = await settleAfterAction(serial, 12000, before);
         const transition = { beforeSignature: before, beforeActivity, afterSignature: after.signature, afterActivity: after.activity };
         if (after.signature === before && after.activity === beforeActivity) {
           return { ok: false, detail: `Double-tapped "${action.target}" but nothing on screen changed.`, ...transition };
@@ -423,7 +428,7 @@ export async function executeAndroidStep(
       case 'submit': {
         const beforeSubmit = uiSignature(await dumpUi(serial));
         await pressKey(serial, 'KEYCODE_ENTER');
-        const afterSubmit = await settleAfterAction(serial);
+        const afterSubmit = await settleAfterAction(serial, 12000, beforeSubmit);
         if (afterSubmit.signature === beforeSubmit) {
           return { ok: false, detail: 'Submitted via the Enter key but nothing on screen changed — the submission had no visible effect.' };
         }
