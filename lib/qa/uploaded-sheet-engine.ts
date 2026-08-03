@@ -70,6 +70,12 @@ interface StepRecord {
   screenshotDataUrl: string | null;
   /** The expectation this step was judged against, when the sheet gave it one. */
   expected?: string;
+  /**
+   * True only when the expectation was actually asserted against the screen.
+   * A PASS with verified:false means the step executed successfully but its
+   * expected result was not machine-checkable — real, but needing a human eye.
+   */
+  verified?: boolean;
 }
 
 /**
@@ -96,12 +102,23 @@ async function recoverFromCrash(serial: string, pkg: string, avoidAds: boolean) 
 }
 
 export interface AndroidRunTotals {
-  passed: number; failed: number; blocked: number; bugSeq: number;
+  passed: number; failed: number; blocked: number; skipped: number; bugSeq: number;
   severityCounts: Record<string, number>;
   /** True when the user's Stop Execution request ended the run early — the
    *  caller must record the run as 'cancelled' rather than compute pass/fail
    *  from whatever partial totals were collected. */
   cancelled: boolean;
+  /**
+   * Step-level accounting, so completion is a MEASUREMENT rather than a
+   * constant. `run.progress = 100` used to be written unconditionally at the
+   * end of every path, so a run that stopped after 3 of 40 cases — device
+   * unplugged, user cancelled, preparation blocked — still reported 100%
+   * Complete. The caller now derives progress from these.
+   */
+  executedSteps: number;
+  totalSteps: number;
+  /** Cases that reached a verdict of their own (pass/fail/blocked/skipped). */
+  verdictedCases: number;
 }
 
 export async function executeAndroidSuite(opts: {
@@ -137,6 +154,13 @@ export async function executeAndroidSuite(opts: {
   let passed = 0;
   let failed = 0;
   let blocked = 0;
+  let skipped = 0;
+  // Progress is reported against the steps the sheet actually contains, so it
+  // advances WITHIN a long test case and so a run that stops early can never
+  // round up to 100%.
+  const totalSteps = cases.reduce((n: number, tc: any) => n + (tc.steps?.length ?? 0), 0);
+  let executedSteps = 0;
+  let verdictedCases = 0;
   let bugSeq = 0;
   const severityCounts: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
   const nextBugNumber = () => `BUG-${run.runNumber}-${String(++bugSeq).padStart(3, '0')}`;
@@ -237,12 +261,18 @@ export async function executeAndroidSuite(opts: {
   };
 
   // The very first real frame, so the Live Device Preview is populated before
-  // step 1 rather than showing an empty panel.
-  if (prep.screenshot) {
-    await QaScreenshot.create({
-      runId, screenName: 'App launched', testStep: 'Preparation',
-      imageDataUrl: prep.screenshot,
-    });
+  // step 1 rather than showing an empty panel. Deliberately NOT awaited: a
+  // device screencap costs ~3s and step 1 does not depend on the image, so it
+  // is stored whenever it lands.
+  const launchFrame = prep.pendingScreenshot ?? (prep.screenshot ? Promise.resolve(prep.screenshot) : null);
+  if (launchFrame) {
+    void launchFrame
+      .then((shot) => (shot
+        ? QaScreenshot.create({
+          runId, screenName: 'App launched', testStep: 'Preparation', imageDataUrl: shot,
+        })
+        : null))
+      .catch(() => null);
   }
 
   caseLoop:
@@ -267,9 +297,22 @@ export async function executeAndroidSuite(opts: {
     run.currentScenario = tc.scenario;
     run.currentCase = `${tc.testCaseId}: ${tc.scenario}`;
     run.currentExpected = tc.expectedResult ?? '';
-    run.currentActual = '';
+    // Explicit in-progress values rather than blanks. The re-anchor below is
+    // seconds of adb work, and leaving these stale meant the panel showed the
+    // PREVIOUS case's step text and actual result under the new case's heading;
+    // blanking them instead made the UI fall through to an unrelated case's
+    // stored result. Both told the user something untrue about right now.
+    run.currentStep = 'Preparing test case…';
+    run.currentActual = 'Executing…';
+    run.currentScreen = '';
+    run.currentStepNumber = null;
     run.currentStepStatus = 'running';
-    run.progress = Math.round((i / Math.max(total, 1)) * 100);
+    // Measured against steps, not cases, so a 20-step case does not sit at the
+    // same percentage for minutes. Capped below 100 here: only the caller, after
+    // confirming every case was verdicted, may write 100.
+    run.progress = totalSteps > 0
+      ? Math.min(99, Math.round((executedSteps / totalSteps) * 100))
+      : Math.min(99, Math.round((i / Math.max(total, 1)) * 100));
     await run.save();
     await log(runId, 'automation', 'info', `[${tc.testCaseId}] ${tc.scenario} — executing ${tc.steps.length} step(s) on ${deviceLabel}.`);
 
@@ -365,21 +408,25 @@ export async function executeAndroidSuite(opts: {
 
     // A case with no steps executes nothing, so it cannot be evidence of
     // anything. Passing it would report success for work never performed.
+    //
+    // SKIPPED, not blocked: nothing obstructed the device or the app — the
+    // sheet simply did not say what to do. Reporting it as blocked put an
+    // environment-shaped problem in front of the user for what is a one-line
+    // authoring fix.
     if (tc.steps.length === 0) {
-      const shot = await captureDeviceScreen(serial);
-      tc.result = 'blocked';
-      tc.actualResult = 'Blocked: the Steps column is empty for this test case, so there was nothing to execute. Add the step-by-step actions to the sheet and re-run.';
+      tc.result = 'skipped';
+      tc.actualResult = 'Not executed: the Steps column is empty for this test case, so there was nothing to perform. Add the step-by-step actions to the sheet and re-run.';
       tc.failedStepIndex = null;
       tc.screenName = await currentAndroidScreen(serial);
       tc.stepResults = [];
       await tc.save();
-      blocked += 1;
-      run.blockedCases = blocked;
+      skipped += 1;
+      run.skippedCases = skipped;
+      run.currentStep = 'Skipped — the sheet lists no steps for this test case';
+      run.currentActual = tc.actualResult;
+      run.currentStepStatus = 'skipped';
       await run.save();
-      if (shot) {
-        await QaScreenshot.create({ runId, screenName: 'No steps to execute', testStep: tc.scenario, imageDataUrl: shot });
-      }
-      await log(runId, 'automation', 'warn', `[${tc.testCaseId}] BLOCKED — the sheet's Steps column is empty for this case.`);
+      await log(runId, 'automation', 'warn', `[${tc.testCaseId}] SKIPPED — the sheet's Steps column is empty for this case.`);
       continue;
     }
 
@@ -405,7 +452,11 @@ export async function executeAndroidSuite(opts: {
       // a per-step sheet reads step-by-step instead of repeating the case's
       // end-state expectation on every row.
       run.currentExpected = stepExpected || (tc.expectedResult ?? '');
-      run.currentActual = '';
+      // Never blank: an empty value makes the panel fall back to some other
+      // case's stored result, which reads as this step having already produced
+      // an outcome it has not.
+      run.currentActual = 'Executing…';
+      run.currentStepNumber = si + 1;
       run.currentStepStatus = 'running';
       await run.save();
 
@@ -550,15 +601,47 @@ export async function executeAndroidSuite(opts: {
         judgedExpectation = plan.caseLevel;
       }
 
+      // BLOCKED is reserved for a genuine obstruction. Everything else resolves
+      // to a real PASS or FAIL:
+      //
+      //  - expectation verified            -> PASS  (verified)
+      //  - expectation contradicted        -> FAIL
+      //  - app not on screen to check      -> BLOCKED (a real blocker)
+      //  - expectation not machine-checkable, or the sheet gave none
+      //                                    -> PASS, verified:false
+      //
+      // That last case is the important one. It used to be BLOCKED, which made
+      // runs look obstructed when in fact the step executed perfectly and only
+      // the WORDING of the expectation ("the animation is smooth") was beyond a
+      // view hierarchy. The step's own success is real and is reported as such;
+      // `verified` records that a human still needs to confirm the wording.
+      let verified = false;
       if (judgedExpectation) {
         const v = await validateAndroidExpectation(serial, judgedExpectation, pkg, transition);
-        status = v.status === 'pass' ? 'pass' : v.status === 'fail' ? 'fail' : 'blocked';
+        if (v.status === 'pass') {
+          status = 'pass';
+          verified = true;
+        } else if (v.status === 'fail') {
+          status = 'fail';
+        } else if (v.blocker) {
+          status = 'blocked';
+        } else {
+          status = 'pass';
+        }
         // Keep both halves of the story: what the action did, and how the
         // resulting screen measured up against the expectation.
         actual = `${exec.detail} ${v.actual}`.trim();
         assertion = v.assertion;
       } else if (action.kind === 'unknown') {
-        status = 'blocked';
+        // Not a blocker: nothing obstructed the device, the sentence simply did
+        // not map to an action. Reported as skipped so it is visibly unrun
+        // rather than masquerading as an environment problem.
+        status = 'skipped';
+        actual = `This step could not be mapped to an executable action, so it was not performed: "${instruction}". Rephrase it with a clear action verb (tap / enter / verify / scroll) to make it executable.`;
+        assertion = 'unmappable';
+      } else if (exec.ok) {
+        // Executed successfully with no expectation to check against.
+        status = 'pass';
       }
 
       // Real capture of the device screen after the interaction. The screenshot
@@ -573,19 +656,29 @@ export async function executeAndroidSuite(opts: {
         stepNumber: si + 1, action: action.kind, instruction, status, actual, assertion,
         durationMs, url: screen, screenshotDataUrl: shot,
         expected: judgedExpectation || undefined,
+        verified,
       });
+      // Counts toward progress only when the step was genuinely attempted on the
+      // device. An unmappable step was never performed, so it must not inflate
+      // completion.
+      if (status !== 'skipped') executedSteps += 1;
 
       if (shot) {
         await QaScreenshot.create({
           runId, screenName: `${screen} — step ${si + 1}`, testStep: tc.scenario, imageDataUrl: shot,
+          testCaseId: tc.testCaseId, stepNumber: si + 1,
         });
       }
 
       // Live preview: current screen, what this step actually did, and its
-      // verdict — visible while the run is still in flight.
+      // verdict. Written immediately AFTER the frame for the same step, so the
+      // panel's image and text describe the same moment.
       run.currentScreen = screen;
       run.currentActual = actual;
       run.currentStepStatus = status;
+      // Identity of the frame this text belongs to, so the panel can tell
+      // whether the image it is showing is the one these values describe.
+      run.currentStepNumber = si + 1;
       await run.save();
 
       if (status === 'fail' || status === 'blocked') {
@@ -631,6 +724,9 @@ export async function executeAndroidSuite(opts: {
     const blockedSteps = stepRecords.filter((s) => s.status === 'blocked');
     const passedSteps = stepRecords.filter((s) => s.status === 'pass');
 
+    const skippedSteps = stepRecords.filter((s) => s.status === 'skipped');
+    const unverifiedPasses = passedSteps.filter((s) => s.verified === false && s.expected);
+
     if (failedSteps.length > 0) {
       firstFailedStepIndex = failedSteps[0].stepNumber - 1;
       finalResult = 'fail';
@@ -639,16 +735,28 @@ export async function executeAndroidSuite(opts: {
         : `${failedSteps.length} of ${tc.steps.length} steps failed. `
           + failedSteps.map((s) => `Step ${s.stepNumber} ("${s.instruction}"): ${s.actual}`).join(' ');
     } else if (blockedSteps.length > 0) {
-      // Ran but unjudgeable — never PASS (nothing was proven) and never FAIL
-      // (nothing was shown broken).
+      // BLOCKED only reaches here for a genuine obstruction — the app was not on
+      // screen to check against. An expectation that merely could not be proven
+      // no longer lands in this branch; it passes with verified:false.
       finalResult = 'blocked';
-      finalActual = `${passedSteps.length} of ${tc.steps.length} step(s) were verified; step ${blockedSteps[0].stepNumber} ("${blockedSteps[0].instruction}") could not be verified automatically: ${blockedSteps[0].actual} The expected result therefore needs manual confirmation.`;
+      finalActual = `Execution was blocked at step ${blockedSteps[0].stepNumber} ("${blockedSteps[0].instruction}"): ${blockedSteps[0].actual}`;
       if (firstFailedStepIndex === null) firstFailedStepIndex = blockedSteps[0].stepNumber - 1;
     } else {
       finalResult = 'pass';
-      finalActual = plan.mode === 'per-step'
+      const base = plan.mode === 'per-step'
         ? `All ${tc.steps.length} step(s) executed and each matched its own expected result.`
         : `All ${tc.steps.length} step(s) executed and the expected result was verified on the device screen.`;
+      // A pass is still a pass when part of the expectation was beyond automated
+      // checking — but say so plainly rather than quietly overstating it.
+      finalActual = [
+        base,
+        unverifiedPasses.length > 0
+          ? `${unverifiedPasses.length} step(s) executed successfully but their expected result is not machine-verifiable and needs manual confirmation: ${unverifiedPasses.map((s) => `step ${s.stepNumber}`).join(', ')}.`
+          : '',
+        skippedSteps.length > 0
+          ? `${skippedSteps.length} step(s) could not be mapped to an executable action and were not performed: ${skippedSteps.map((s) => `step ${s.stepNumber}`).join(', ')}.`
+          : '',
+      ].filter(Boolean).join(' ');
     }
 
     // A case-level expectation that never got asserted (because the final step
@@ -707,6 +815,16 @@ export async function executeAndroidSuite(opts: {
     tc.failedStepIndex = firstFailedStepIndex;
     tc.screenName = screen;
     tc.stepResults = stepRecords;
+    verdictedCases += 1;
+
+    // Publish the case's own verdict to the live panel. Without this the tiles
+    // kept showing the LAST STEP's actual result and badge through the whole
+    // verdict phase — which relaunches the app and re-asserts the expectation,
+    // and can flip the result — so the panel could show a green step while the
+    // case was being marked failed.
+    run.currentActual = finalActual;
+    run.currentStepStatus = finalResult;
+    run.currentScreen = screen;
 
     if (finalResult === 'pass') {
       passed += 1;
@@ -752,5 +870,8 @@ export async function executeAndroidSuite(opts: {
 
   if (pkg) await stopApp(serial, pkg).catch(() => {});
 
-  return { passed, failed, blocked, bugSeq, severityCounts, cancelled };
+  return {
+    passed, failed, blocked, skipped, bugSeq, severityCounts, cancelled,
+    executedSteps, totalSteps, verdictedCases,
+  };
 }

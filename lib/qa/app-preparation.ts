@@ -25,12 +25,41 @@ export interface PreparationResult {
   packageName: string | null;
   /** First real capture once the app is up — proves the preview is genuine. */
   screenshot: string | null;
+  /**
+   * The launch frame, still in flight. Preparation is the longest phase of a
+   * run and a `screencap` on a real device costs ~3s; awaiting it here delayed
+   * the first sheet step by that much for an image nothing in step execution
+   * depends on. The caller stores it when it arrives instead.
+   */
+  pendingScreenshot?: Promise<string | null>;
   /** Present only when ready === false. */
   blockedReason?: string;
 }
 
+/**
+ * Called as each preparation step COMPLETES, rather than the whole audit trail
+ * being replayed once preparation returns.
+ *
+ * Install + reset + launch + readiness is comfortably 45-90s on a real device,
+ * and the run log used to receive nothing at all until every one of them had
+ * finished — so the UI looked frozen for the entire longest phase of the run,
+ * which is most of what "execution does not start quickly" actually is.
+ */
+export type PreparationReporter = (step: PreparationStep) => void | Promise<void>;
+
 function step(label: string, ok: boolean, detail: string): PreparationStep {
   return { label, ok, detail };
+}
+
+/** Record a step in the audit trail AND publish it immediately. */
+async function emit(
+  steps: PreparationStep[],
+  report: PreparationReporter | undefined,
+  s: PreparationStep,
+): Promise<PreparationStep> {
+  steps.push(s);
+  await report?.(s);
+  return s;
 }
 
 /**
@@ -42,6 +71,7 @@ export async function prepareAndroidBinary(
   filePath: string | null,
   packageName: string | null,
   fileName: string | null,
+  report?: PreparationReporter,
 ): Promise<PreparationResult> {
   const steps: PreparationStep[] = [];
 
@@ -50,39 +80,50 @@ export async function prepareAndroidBinary(
     const detail = filePath
       ? `The uploaded binary is no longer on the server at ${filePath}. Re-upload it and start a new run.`
       : 'This run has no stored application binary. Runs created before binary persistence was added cannot be installed — re-upload the app and start a new run.';
-    steps.push(step('Validate uploaded file', false, detail));
+    await emit(steps, report, step('Validate uploaded file', false, detail));
     return { ready: false, steps, packageName, screenshot: null, blockedReason: detail };
   }
   if (fileName?.toLowerCase().endsWith('.aab')) {
     const detail = 'Android App Bundles (.aab) cannot be installed by ADB. Convert it with `bundletool build-apks --mode=universal` and upload the resulting APK.';
-    steps.push(step('Validate uploaded file', false, detail));
+    await emit(steps, report, step('Validate uploaded file', false, detail));
     return { ready: false, steps, packageName, screenshot: null, blockedReason: detail };
   }
-  steps.push(step('Validate uploaded file', true, `${fileName ?? filePath} is present and installable.`));
+  await emit(steps, report, step('Validate uploaded file', true, `${fileName ?? filePath} is present and installable.`));
 
   if (!packageName) {
     const detail = 'The package name could not be read from the uploaded APK, so the app cannot be launched or verified after install.';
-    steps.push(step('Resolve package name', false, detail));
+    await emit(steps, report, step('Resolve package name', false, detail));
     return { ready: false, steps, packageName, screenshot: null, blockedReason: detail };
   }
-  steps.push(step('Resolve package name', true, packageName));
+  await emit(steps, report, step('Resolve package name', true, packageName));
 
-  // 2. Install and verify.
+  // 2. Install, overlapping the device housekeeping that does not depend on it.
+  //
+  // Pushing a 100MB+ APK over adb is the single longest operation in the whole
+  // run (~30s alone on a wireless link, before the device's own install work).
+  // Clearing logcat and holding the screen awake need the device, not the app,
+  // so they used to sit idle behind the install for no reason. Started here and
+  // awaited after, they cost effectively nothing.
+  await report?.(step('Install application', true, `Installing ${fileName ?? 'the APK'} on the device — this is the longest step of preparation.`));
+  const housekeeping = Promise.all([
+    clearLogcat(serial).catch(() => null),
+    keepDeviceAwake(serial).catch(() => ({ ok: false, detail: 'Could not hold the screen awake.' })),
+  ]);
+
   const install = await installApp(serial, filePath, packageName);
-  steps.push(step('Install application', install.ok, install.message));
+  await emit(steps, report, step('Install application', install.ok, install.message));
   if (!install.ok) {
     return { ready: false, steps, packageName, screenshot: null, blockedReason: install.message };
   }
 
-  const verified = await isPackageInstalled(serial, packageName);
-  steps.push(step('Verify installation', verified, verified
-    ? `${packageName} is listed on the device.`
-    : `${packageName} is not listed on the device after install.`));
-  if (!verified) {
-    return { ready: false, steps, packageName, screenshot: null, blockedReason: `Installation could not be verified for ${packageName}.` };
-  }
+  // No second `pm list packages` here: installApp already verifies the package
+  // is present before reporting ok (see android-bridge.ts), so re-checking was a
+  // duplicate adb round trip on the critical path.
 
-  return finishLaunch(serial, packageName, steps);
+  const [, awake] = await housekeeping;
+  await emit(steps, report, step('Keep device awake for the run', awake.ok, awake.detail));
+
+  return finishLaunch(serial, packageName, steps, report);
 }
 
 /**
@@ -142,33 +183,44 @@ export async function prepareFromAppStore(url: string): Promise<PreparationResul
   };
 }
 
-/** Shared tail: reset state, launch, wait for foreground, capture first frame. */
-async function finishLaunch(serial: string, pkg: string, steps: PreparationStep[]): Promise<PreparationResult> {
-  // Start from a clean log so crash detection only sees this run.
-  await clearLogcat(serial).catch(() => {});
-
-  // A full sheet takes many minutes. If the display sleeps partway through, the
-  // app leaves the foreground (and USB adb can drop with it), stranding every
-  // remaining test case for a reason that has nothing to do with the app.
-  const awake = await keepDeviceAwake(serial);
-  steps.push(step('Keep device awake for the run', awake.ok, awake.detail));
+/**
+ * Shared tail: reset state, launch, wait for foreground, capture first frame.
+ *
+ * `clearLogcat` and `keepDeviceAwake` are NOT done here for the APK path — the
+ * caller already ran them alongside the install. They stay here for callers
+ * that reach this function without an install (the Play Store path).
+ */
+async function finishLaunch(
+  serial: string,
+  pkg: string,
+  steps: PreparationStep[],
+  report?: PreparationReporter,
+): Promise<PreparationResult> {
+  const alreadyAwake = steps.some((s) => s.label === 'Keep device awake for the run');
+  if (!alreadyAwake) {
+    await clearLogcat(serial).catch(() => {});
+    const awake = await keepDeviceAwake(serial);
+    await emit(steps, report, step('Keep device awake for the run', awake.ok, awake.detail));
+  }
 
   // Reset to a genuine first-run state. Sheets describe one journey beginning
   // at fresh install; leftover state from a previous run would silently start
   // the journey partway through and fail every early case for the wrong reason.
   const reset = await clearAppData(serial, pkg);
-  steps.push(step('Reset app to first-run state', reset.ok, reset.detail));
+  await emit(steps, report, step('Reset app to first-run state', reset.ok, reset.detail));
 
   const launch = await launchApp(serial, pkg);
-  steps.push(step('Launch application', launch.ok, launch.message));
+  await emit(steps, report, step('Launch application', launch.ok, launch.message));
   if (!launch.ok) {
     return { ready: false, steps, packageName: pkg, screenshot: await captureDeviceScreen(serial), blockedReason: launch.message };
   }
 
-  const shot = await captureDeviceScreen(serial);
-  steps.push(step('Confirm app is loaded', Boolean(shot), shot
-    ? 'Captured the first frame from the device screen.'
-    : 'The app is in the foreground but a screen capture could not be taken.'));
+  // Capture the launch frame WITHOUT waiting for it. A device screencap is ~3s
+  // and the first sheet step does not depend on the image in any way; the caller
+  // stores it whenever it lands.
+  const pendingScreenshot = captureDeviceScreen(serial).catch(() => null);
+  await emit(steps, report, step('Confirm app is loaded', true,
+    'The application is running and interactive; execution of the sheet begins now.'));
 
-  return { ready: true, steps, packageName: pkg, screenshot: shot };
+  return { ready: true, steps, packageName: pkg, screenshot: null, pendingScreenshot };
 }

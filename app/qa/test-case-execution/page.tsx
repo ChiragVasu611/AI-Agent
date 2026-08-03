@@ -272,6 +272,23 @@ export default function TestCaseExecutionPage() {
   /** Freshly captured device frame while a run is live; falls back to the last
    *  stored step screenshot once the run finishes. */
   const [liveFrame, setLiveFrame] = useState<string | null>(null);
+  /**
+   * The live snapshot that came back WITH the frame above — module, test case,
+   * step, expected, actual, verdict — so every tile in the Live Device panel is
+   * describing the same moment as the image, not a value fetched 1.5s apart on
+   * a different poll.
+   */
+  const [liveStatus, setLiveStatus] = useState<{
+    live?: boolean;
+    inSync?: boolean | null;
+    frameInfo?: { screenName?: string; testCaseId?: string; stepNumber?: number | null } | null;
+    current?: {
+      module?: string | null; testCaseId?: string | null; scenario?: string | null;
+      step?: string | null; stepNumber?: number | null; expected?: string;
+      actual?: string; status?: string | null; screen?: string | null;
+    };
+    progress?: number;
+  } | null>(null);
 
   // Test case table controls
   const [tcSearch, setTcSearch] = useState('');
@@ -328,9 +345,15 @@ export default function TestCaseExecutionPage() {
   // version captured independently on a timer and measured an 8s stall from
   // contending with the engine's own adb calls). A plain DB read is cheap
   // enough to poll quickly with no downside.
+  // The frame AND the text describing it arrive together from one endpoint.
+  // They used to come from two endpoints on different intervals (this one at
+  // 500ms, the run document at 1500ms), so the image on screen and the
+  // Expected/Actual/verdict beside it regularly described different steps.
   useEffect(() => {
     if (!runId || run?.status !== 'running') {
-      setLiveFrame(null);
+      // Keep the last frame on screen after the run ends rather than blanking
+      // the panel; `live` is what drives the streaming indicator.
+      setLiveStatus(null);
       return;
     }
     let cancelled = false;
@@ -338,7 +361,10 @@ export default function TestCaseExecutionPage() {
     async function pump() {
       const res = await fetch(`/api/qa/runs/${runId}/live-frame`).then((r) => r.json()).catch(() => null);
       if (cancelled) return;
-      if (res?.frame) setLiveFrame(res.frame);
+      if (res && !res.error) {
+        if (res.frame) setLiveFrame(res.frame);
+        setLiveStatus(res);
+      }
       // Chained rather than a fixed interval, so a slow response cannot pile up
       // overlapping requests.
       timer = setTimeout(pump, 500);
@@ -814,28 +840,46 @@ export default function TestCaseExecutionPage() {
                 </div>
                 <Progress value={run.progress} className="h-2" />
                 {/*
-                  Every tile reads the run document's own live field. Expected /
-                  Actual / Pass-Fail used to come from `lastEvaluated` — the last
-                  COMPLETED case — so during a run they described the previous
-                  test case while the header above them said "Live". The engines
-                  write currentExpected/currentActual/currentStepStatus on every
-                  step, so the live values are what belong here.
+                  While the run is live these tiles read the SAME response that
+                  delivered the frame beside them (`liveStatus`), falling back to
+                  the run document only once the run has ended.
+
+                  Two earlier versions of this were wrong in opposite directions.
+                  First the values came from `lastEvaluated` — the last COMPLETED
+                  case — so they described the previous test case under a "Live"
+                  heading. Then they came from the run document, which is correct
+                  data but arrives on a 1500ms poll while the frame arrives on a
+                  500ms one, so image and text still drifted apart. Reading both
+                  from one response is what actually keeps them together.
                 */}
+                {(() => {
+                  const cur = (run.status === 'running' ? liveStatus?.current : null) ?? null;
+                  const val = (live: string | null | undefined, fallback: string | null | undefined) =>
+                    (run.status === 'running' ? (live ?? fallback) : fallback) || '—';
+                  const moduleName = val(cur?.module, run.currentModule ?? run.currentSuite);
+                  const tcId = val(cur?.testCaseId, run.currentTestCaseId ?? run.currentCase);
+                  const scenario = val(cur?.scenario, run.currentScenario);
+                  const stepText = val(cur?.step, run.currentStep);
+                  const screen = val(cur?.screen, run.currentScreen);
+                  const expected = val(cur?.expected, run.currentExpected);
+                  const actual = val(cur?.actual, run.currentActual);
+                  const stepStatus = (run.status === 'running' ? cur?.status : null) ?? run.currentStepStatus;
+                  return (
                 <div className="mt-4 grid grid-cols-2 gap-3 text-xs sm:grid-cols-3">
-                  <div><div className="text-muted-foreground">Current Module</div><div className="truncate font-medium" title={run.currentModule ?? run.currentSuite ?? undefined}>{run.currentModule ?? run.currentSuite ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Test Case ID</div><div className="truncate font-medium" title={run.currentTestCaseId ?? run.currentCase ?? undefined}>{run.currentTestCaseId ?? run.currentCase ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Test Case</div><div className="truncate font-medium" title={run.currentScenario ?? undefined}>{run.currentScenario ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Test Step</div><div className="truncate font-medium" title={run.currentStep ?? undefined}>{run.currentStep ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Current Screen</div><div className="truncate font-medium" title={run.currentScreen ?? undefined}>{run.currentScreen ?? '—'}</div></div>
+                  <div><div className="text-muted-foreground">Current Module</div><div className="truncate font-medium" title={moduleName}>{moduleName}</div></div>
+                  <div><div className="text-muted-foreground">Current Test Case ID</div><div className="truncate font-medium" title={tcId}>{tcId}</div></div>
+                  <div><div className="text-muted-foreground">Current Test Case</div><div className="truncate font-medium" title={scenario}>{scenario}</div></div>
+                  <div><div className="text-muted-foreground">Current Test Step</div><div className="truncate font-medium" title={stepText}>{stepText}</div></div>
+                  <div><div className="text-muted-foreground">Current Screen</div><div className="truncate font-medium" title={screen}>{screen}</div></div>
                   <div><div className="text-muted-foreground">Current Feature</div><div className="truncate font-medium" title={run.currentFeature ?? undefined}>{run.currentFeature ?? '—'}</div></div>
-                  <div><div className="text-muted-foreground">Expected Result</div><div className="truncate font-medium" title={run.currentExpected || lastEvaluated?.expectedResult || undefined}>{run.currentExpected || lastEvaluated?.expectedResult || '—'}</div></div>
-                  <div><div className="text-muted-foreground">Actual Result</div><div className="truncate font-medium" title={run.currentActual || lastEvaluated?.actualResult || undefined}>{run.currentActual || lastEvaluated?.actualResult || '—'}</div></div>
+                  <div><div className="text-muted-foreground">Expected Result</div><div className="truncate font-medium" title={expected}>{expected}</div></div>
+                  <div><div className="text-muted-foreground">Actual Result</div><div className="truncate font-medium" title={actual}>{actual}</div></div>
                   <div>
                     <div className="text-muted-foreground">Pass / Fail Status</div>
-                    {run.currentStepStatus && run.currentStepStatus !== 'running' ? (
+                    {stepStatus && stepStatus !== 'running' ? (
                       <span className="inline-flex items-center gap-1.5">
-                        <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[run.currentStepStatus] ?? 'bg-muted-foreground')} />
-                        <Badge className={`${STATUS_BADGE[run.currentStepStatus] ?? STATUS_BADGE.pending} text-[10px]`}>{run.currentStepStatus}</Badge>
+                        <span className={cn('h-2 w-2 rounded-full', STATUS_DOT[stepStatus] ?? 'bg-muted-foreground')} />
+                        <Badge className={`${STATUS_BADGE[stepStatus] ?? STATUS_BADGE.pending} text-[10px]`}>{stepStatus}</Badge>
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1.5">
@@ -845,6 +889,8 @@ export default function TestCaseExecutionPage() {
                     )}
                   </div>
                 </div>
+                  );
+                })()}
               </Card>
 
               {/* Test Case Table */}

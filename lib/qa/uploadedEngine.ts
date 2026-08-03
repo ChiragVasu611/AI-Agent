@@ -117,8 +117,13 @@ async function blockAll(runId: string, run: any, cases: any[], reason: string, p
     }));
     await tc.save();
     run.blockedCases = i + 1;
-    run.totalCases = i + 1;
-    run.progress = Math.round(((i + 1) / Math.max(cases.length, 1)) * 100);
+    // totalCases is the size of the sheet, fixed for the run. Writing `i + 1`
+    // here made the total climb alongside the blocked count, so the UI showed
+    // "n of n blocked" at every moment and the run looked fully accounted for
+    // while it was still marking cases.
+    run.totalCases = cases.length;
+    // No progress here: nothing was executed. Progress measures work done, and
+    // marking rows as blocked is not work done on the device.
     await run.save();
   }
 
@@ -130,8 +135,12 @@ async function blockAll(runId: string, run: any, cases: any[], reason: string, p
   });
 
   run.status = 'partial';
-  run.progress = 100;
+  // Explicitly 0: not one step of the sheet ran. Reporting 100 told the user the
+  // suite had been executed when nothing had been.
+  run.progress = 0;
   run.currentStep = 'Blocked — no execution runtime';
+  run.currentStepStatus = 'blocked';
+  run.currentActual = reason;
   run.currentCase = null;
   run.etaSeconds = 0;
   run.completedAt = new Date();
@@ -305,7 +314,9 @@ async function runOnAndroidDevice(
   sourceRef: string,
 ) {
   // 1. Find a usable, authorized device — preferring the one the user picked.
-  const scan = await scanDevices();
+  // Android only: the iOS probe's result is filtered out on the next line
+  // anyway, and it can add seconds of timeout budget before the run starts.
+  const scan = await scanDevices({ platform: 'android' });
   const usable = scan.devices.filter((d) => d.platform === 'android' && d.state === 'online');
   const wanted = run.deviceSerial ? String(run.deviceSerial) : null;
   const device = (wanted ? usable.find((d) => d.id === wanted) : null) ?? usable[0];
@@ -335,12 +346,32 @@ async function runOnAndroidDevice(
   await log(runId, 'automation', 'info', `Preparing "${project.name}" on ${deviceLabel} (${device.id}).`);
 
   // 2. Prepare the app — never execute before it is genuinely running.
+  //
+  // Preparation steps are logged AS THEY HAPPEN. Replaying them afterwards left
+  // the run log empty for the 45-90s that install + reset + launch actually
+  // take, so the UI looked frozen through the longest phase of the run.
+  const reportPrep = async (s: { label: string; ok: boolean; detail: string }) => {
+    run.currentStep = `Preparing: ${s.label}`;
+    await run.save().catch(() => null);
+    await log(runId, 'automation', s.ok ? 'info' : 'warn', `Preparation — ${s.label}: ${s.detail}`);
+  };
+
   const prep = sourceType === 'play_store_url'
     ? await prepareFromPlayStore(device.id, sourceRef)
-    : await prepareAndroidBinary(device.id, project.binaryPath ?? null, project.appPackageName ?? null, project.sourceFileName ?? sourceRef);
+    : await prepareAndroidBinary(
+      device.id,
+      project.binaryPath ?? null,
+      project.appPackageName ?? null,
+      project.sourceFileName ?? sourceRef,
+      reportPrep,
+    );
 
-  for (const s of prep.steps) {
-    await log(runId, 'automation', s.ok ? 'info' : 'warn', `Preparation — ${s.label}: ${s.detail}`);
+  // The Play Store path does not stream, so replay its trail (the APK path
+  // already published every step above and must not log them twice).
+  if (sourceType === 'play_store_url') {
+    for (const s of prep.steps) {
+      await log(runId, 'automation', s.ok ? 'info' : 'warn', `Preparation — ${s.label}: ${s.detail}`);
+    }
   }
 
   if (!prep.ready) {
@@ -365,24 +396,61 @@ async function runOnAndroidDevice(
     await log(runId, 'error', 'error', `Device execution aborted: ${(e as Error).message}`);
     run.status = 'failed';
     run.currentStep = `Aborted: ${(e as Error).message}`;
+    // Progress deliberately left where it stopped: the run did NOT complete, and
+    // writing 100 here would report an aborted run as fully executed.
     run.completedAt = new Date();
     await run.save();
     await onRunCompleted(runId);
     return;
   }
 
-  const { passed, failed, blocked, cancelled } = totals;
-  // A user-requested stop must land as 'cancelled', never be overwritten by
-  // whatever pass/fail totals happened to be collected before it took effect.
-  run.status = cancelled ? 'cancelled' : failed > 0 ? (passed > 0 ? 'partial' : 'failed') : blocked > 0 ? 'partial' : 'passed';
-  run.progress = 100;
-  run.currentStep = cancelled ? 'Cancelled' : 'Completed';
+  const {
+    passed, failed, blocked, skipped, cancelled, executedSteps, totalSteps, verdictedCases,
+  } = totals;
+
+  // "Complete" is a measurement, not a constant.
+  //
+  // This used to be an unconditional `run.progress = 100` + 'Completed', so a
+  // run that stopped after 3 of 40 cases — user cancelled, device unplugged,
+  // preparation blocked — still displayed 100% Complete, which is the single
+  // most misleading thing this module could report. A run is complete only when
+  // every case reached a verdict AND every step the sheet contains was executed.
+  const allCasesVerdicted = verdictedCases >= cases.length;
+  const allStepsExecuted = totalSteps === 0 || executedSteps >= totalSteps;
+  const fullyExecuted = !cancelled && allCasesVerdicted && allStepsExecuted;
+
+  run.status = cancelled
+    ? 'cancelled'
+    : failed > 0 ? (passed > 0 ? 'partial' : 'failed')
+      : !fullyExecuted ? 'partial'
+        : blocked > 0 || skipped > 0 ? 'partial' : 'passed';
+
+  run.progress = fullyExecuted
+    ? 100
+    : totalSteps > 0
+      ? Math.min(99, Math.round((executedSteps / totalSteps) * 100))
+      : Math.min(99, Math.round((verdictedCases / Math.max(cases.length, 1)) * 100));
+
+  run.currentStep = cancelled
+    ? `Stopped by user after ${verdictedCases}/${cases.length} test case(s)`
+    : fullyExecuted
+      ? 'Completed'
+      : `Ended early — ${verdictedCases}/${cases.length} test case(s) and ${executedSteps}/${totalSteps} step(s) executed`;
+
   run.currentCase = null;
+  run.currentStepStatus = fullyExecuted ? 'pass' : 'blocked';
   run.etaSeconds = 0;
+  run.passedCases = passed;
+  run.failedCases = failed;
+  run.blockedCases = blocked;
+  run.skippedCases = skipped;
   run.completedAt = new Date();
   await run.save();
 
-  await log(runId, 'automation', 'info', `Run ${cancelled ? 'stopped by user' : 'completed'} on ${deviceLabel}: ${run.status.toUpperCase()} — ${passed}/${cases.length} passed, ${failed} failed, ${blocked} blocked.`);
+  await log(runId, 'automation', fullyExecuted ? 'info' : 'warn',
+    `Run ${cancelled ? 'stopped by user' : fullyExecuted ? 'completed' : 'ended early'} on ${deviceLabel}: ${String(run.status).toUpperCase()} — `
+    + `${passed}/${cases.length} passed, ${failed} failed, ${blocked} blocked, ${skipped} skipped; `
+    + `${executedSteps}/${totalSteps} step(s) executed.`);
   await onRunCompleted(runId);
 }
 
@@ -459,6 +527,27 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
   const severityCounts: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
   const caseElapsedMs: number[] = [];
 
+  // Step-level accounting, so completion is measured rather than assumed.
+  const totalSteps = cases.reduce((n: number, tc: any) => n + (tc.steps?.length ?? 0), 0);
+  let executedSteps = 0;
+  let verdictedCases = 0;
+
+  // Cooperative cancellation. The browser path had NONE: Stop Execution wrote
+  // status 'cancelled' to the database, this loop never read it, kept running
+  // every remaining case, and then overwrote the status at the end — so the
+  // button appeared to do nothing. Mirrors the device path's throttled poll.
+  let lastCancelCheck = 0;
+  let cancelled = false;
+  const checkCancelled = async (): Promise<boolean> => {
+    if (cancelled) return true;
+    const now = Date.now();
+    if (now - lastCancelCheck < 2_500) return false;
+    lastCancelCheck = now;
+    const doc = await QaTestRun.findById(runId).select('status').lean<{ status: string } | null>();
+    cancelled = doc?.status === 'cancelled';
+    return cancelled;
+  };
+
   try {
     // Load the target once up front so the first case starts from a real page.
     const navStart = Date.now();
@@ -469,6 +558,11 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
     const targetOrigin = new URL(sourceRef).origin;
 
     for (let i = 0; i < cases.length; i++) {
+      if (await checkCancelled()) {
+        await log(runId, 'automation', 'warn', `Execution stopped by user request before test case ${i + 1}/${cases.length}. Partial results are saved.`);
+        break;
+      }
+
       const tc = cases[i];
       const caseStart = Date.now();
 
@@ -481,7 +575,12 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
       run.currentExpected = tc.expectedResult ?? '';
       run.currentActual = '';
       run.currentStepStatus = 'running';
-      run.progress = Math.round((i / Math.max(total, 1)) * 100);
+      // Measured against steps so it advances within a long case, and capped
+      // below 100 — only the finalization block, having confirmed every case was
+      // verdicted and every step executed, may write 100.
+      run.progress = totalSteps > 0
+        ? Math.min(99, Math.round((executedSteps / totalSteps) * 100))
+        : Math.min(99, Math.round((i / Math.max(total, 1)) * 100));
       await run.save();
       await log(runId, 'automation', 'info', `[${tc.testCaseId}] ${tc.scenario} — executing ${tc.steps.length} step(s).`);
 
@@ -587,6 +686,7 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
           stepNumber: si + 1, action: action.kind, instruction, status, actual, assertion,
           durationMs, url: session.page.url(), screenshotDataUrl: shot,
         });
+        executedSteps += 1;
 
         await QaScreenshot.create({
           runId, screenName: `${screen} — step ${si + 1}`, testStep: tc.scenario,
@@ -648,6 +748,7 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
       tc.failedStepIndex = firstFailedStepIndex;
       tc.screenName = screen;
       tc.stepResults = stepRecords;
+      verdictedCases += 1;
 
       if (finalResult === 'pass') {
         passed += 1;
@@ -728,14 +829,39 @@ export async function runUploadedTestExecution(runId: string, apiKey: string | n
   await session.close();
 
   const criticalOrHigh = severityCounts.critical + severityCounts.high;
-  run.status = criticalOrHigh > 0 || failed > 0 ? (passed > 0 ? 'partial' : 'failed') : blocked > 0 ? 'partial' : 'passed';
-  run.progress = 100;
-  run.currentStep = 'Completed';
+
+  // Same rule as the device path: 100% Complete is a measurement. A cancelled or
+  // early-ended browser run keeps the percentage it actually reached.
+  const allCasesVerdicted = verdictedCases >= cases.length;
+  const allStepsExecuted = totalSteps === 0 || executedSteps >= totalSteps;
+  const fullyExecuted = !cancelled && allCasesVerdicted && allStepsExecuted;
+
+  run.status = cancelled
+    ? 'cancelled'
+    : criticalOrHigh > 0 || failed > 0 ? (passed > 0 ? 'partial' : 'failed')
+      : !fullyExecuted ? 'partial'
+        : blocked > 0 || skipped > 0 ? 'partial' : 'passed';
+
+  run.progress = fullyExecuted
+    ? 100
+    : totalSteps > 0
+      ? Math.min(99, Math.round((executedSteps / totalSteps) * 100))
+      : Math.min(99, Math.round((verdictedCases / Math.max(cases.length, 1)) * 100));
+
+  run.currentStep = cancelled
+    ? `Stopped by user after ${verdictedCases}/${cases.length} test case(s)`
+    : fullyExecuted
+      ? 'Completed'
+      : `Ended early — ${verdictedCases}/${cases.length} test case(s) and ${executedSteps}/${totalSteps} step(s) executed`;
+
   run.currentCase = null;
   run.etaSeconds = 0;
   run.completedAt = new Date();
   await run.save();
 
-  await log(runId, 'automation', 'info', `Run completed: ${run.status.toUpperCase()} — ${passed}/${total} passed, ${failed} failed, ${blocked} blocked, ${skipped} skipped.`);
+  await log(runId, 'automation', fullyExecuted ? 'info' : 'warn',
+    `Run ${cancelled ? 'stopped by user' : fullyExecuted ? 'completed' : 'ended early'}: ${String(run.status).toUpperCase()} — `
+    + `${passed}/${total} passed, ${failed} failed, ${blocked} blocked, ${skipped} skipped; `
+    + `${executedSteps}/${totalSteps} step(s) executed.`);
   await onRunCompleted(runId);
 }

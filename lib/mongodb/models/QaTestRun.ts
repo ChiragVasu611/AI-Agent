@@ -22,6 +22,14 @@ const qaTestRunSchema = new Schema({
   currentExpected: { type: String, default: '' },
   currentActual: { type: String, default: '' },
   currentStepStatus: { type: String, enum: ['running', 'pass', 'fail', 'blocked', 'skipped'], default: 'running' },
+  /**
+   * Which step within the current test case these live values describe. Paired
+   * with the same field on QaScreenshot so the Live Device panel can tell
+   * whether the frame on screen is the one the text is talking about, instead of
+   * silently rendering a frame from the previous step beside the current step's
+   * expected/actual.
+   */
+  currentStepNumber: { type: Number, default: null },
 
   runNumber: { type: Number, required: true, index: true },
   runName: { type: String, default: '' },

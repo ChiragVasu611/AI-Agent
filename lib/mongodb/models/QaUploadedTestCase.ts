@@ -41,6 +41,13 @@ const qaUploadedTestCaseSchema = new Schema({
        * rather than repeating the case's end-state expectation on every row.
        */
       expected: { type: String, default: '' },
+      /**
+       * Whether the expectation was genuinely asserted against the screen. A
+       * PASS with verified:false executed correctly but its expected result was
+       * not machine-checkable (visual quality, timing, audio) — which is a real
+       * pass needing human confirmation, NOT a blocker.
+       */
+      verified: { type: Boolean, default: false },
       assertion: { type: String, default: '' },
       durationMs: { type: Number, default: 0 },
       url: { type: String, default: '' },

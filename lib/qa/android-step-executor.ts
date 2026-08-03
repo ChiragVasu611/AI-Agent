@@ -366,7 +366,22 @@ export interface AndroidValidation {
   status: 'pass' | 'fail' | 'inconclusive';
   actual: string;
   assertion: string;
+  /**
+   * True when the expectation could not be checked because something genuinely
+   * BLOCKED the check — currently: the app under test was not on screen, so
+   * nothing visible belonged to it.
+   *
+   * This is what lets the engine tell a real blocker apart from an expectation
+   * that simply is not machine-verifiable ("the animation is smooth", "the logo
+   * is centred"). Both come back `inconclusive`, but only the former is a
+   * BLOCKED result — the latter means the step ran fine and a human needs to
+   * confirm the wording, which must not be reported as a blocker.
+   */
+  blocker: boolean;
 }
+
+/** Assertion classes that represent a genuine blocker rather than a soft "cannot judge". */
+const BLOCKING_ASSERTIONS = new Set(['app-not-foreground']);
 
 /**
  * "not"/"never"/"shouldn't" directly negate the verb of the sentence they're
@@ -495,6 +510,15 @@ const CHROME_NOUNS = new Set([
   'thumbnail', 'avatar', 'graphic', 'illustration', 'picture', 'photo',
   'animation', 'spinner', 'loader', 'layout', 'interface', 'design', 'theme',
   'font', 'alignment', 'placeholder', 'element', 'elements', 'component',
+  // Surface nouns. "The home screen is displayed" names WHICH surface the user
+  // should be looking at — it is not a promise that the word "home" appears
+  // anywhere on it. Left out of this list, that expectation went to the keyword
+  // fallback, searched the rendered text for "home", and failed an app that was
+  // sitting correctly on its home screen showing "HOTSPOT READY". Observed on a
+  // real run; a screen's NAME is almost never text the screen renders.
+  'home', 'screen', 'screens', 'page', 'pages', 'view', 'window', 'dashboard',
+  'main', 'app', 'application', 'section', 'panel', 'tab', 'menu', 'popup',
+  'dialog', 'modal', 'toast', 'snackbar', 'notification',
 ]);
 
 function contentWords(text: string): string[] {
@@ -515,7 +539,9 @@ export async function validateAndroidExpectation(
 ): Promise<AndroidValidation> {
   const expected = String(expectedRaw ?? '').trim();
   if (!expected) {
-    return { status: 'inconclusive', actual: 'The sheet did not specify an Expected Result, so nothing could be asserted.', assertion: 'none' };
+    // No expectation in the sheet is not a blocker — there was simply nothing
+    // to assert. The step's own execution still decides its verdict.
+    return { status: 'inconclusive', actual: 'The sheet did not specify an Expected Result, so nothing could be asserted.', assertion: 'none', blocker: false };
   }
 
   // Read-only on purpose. An earlier version called ensureAppForeground() from
@@ -551,6 +577,7 @@ export async function validateAndroidExpectation(
       status: 'fail',
       actual: describe(failed) + (passed.length > 0 ? ` (Verified separately: ${describe(passed)})` : ''),
       assertion: failed.map((v) => v.assertion).join('+'),
+      blocker: false,
     };
   }
   if (passed.length > 0) {
@@ -558,12 +585,16 @@ export async function validateAndroidExpectation(
       status: 'pass',
       actual: describe(passed) + (unknown.length > 0 ? ` Not machine-verifiable: ${describe(unknown)}` : ''),
       assertion: passed.map((v) => v.assertion).join('+'),
+      blocker: false,
     };
   }
   return {
     status: 'inconclusive',
     actual: describe(unknown),
     assertion: unknown.map((v) => v.assertion).join('+') || 'none',
+    // Only a genuine obstruction counts. An expectation that is merely
+    // unprovable from a view hierarchy is not a blocker.
+    blocker: unknown.some((v) => BLOCKING_ASSERTIONS.has(v.assertion)),
   };
 }
 
@@ -582,10 +613,30 @@ async function evaluateClause(
   const { nodes, screenText, pkg, fg, context } = ctx;
   const negated = isNegated(clause);
 
-  // 1) Crash / app-alive claims. Stemmed, so "crashing" and "crashes" match too
-  //    — an unstemmed \bcrash\b missed "without crashing" and fell through to
-  //    keyword matching, which then demanded the word "crashing" on screen.
-  if (/\b(?:crash\w*|terminate\w*|force[\s-]?stop\w*|close[ds]?|exit\w*)\b/i.test(clause) && pkg) {
+  // 1) Crash / app-alive claims — "without crashing", "the app remains open",
+  //    "the screen scrolls without the app closing".
+  //
+  //    Every one of these is really the same checkable question: is the app
+  //    still alive and in front? Answering it from the live device is exact,
+  //    which is why it must be caught HERE rather than falling through to the
+  //    keyword fallback at the bottom — that fallback hunts for the clause's own
+  //    words on screen, so "without the app closing" went looking for the
+  //    literal text "closing", never found it, and reported the app's perfectly
+  //    healthy survival as a FAILURE. Verified against a real run: three cases
+  //    failed this way, one of them semantically inverted.
+  //
+  //    `clos\w*` rather than `close[ds]?`: the old form matched close/closed/
+  //    closes but NOT "closing", which is the participle sheets actually use.
+  const LIVENESS_VOCAB = /\b(?:crash\w*|terminate\w*|force[\s-]?stop\w*|clos\w*|exit\w*|freez\w*|hang\w*|kill\w*|quit\w*|dismiss(?:ed|es)?\s+itself)\b/i;
+  //    Phrases that assert liveness without naming a failure mode at all.
+  const LIVENESS_PHRASE = /\b(?:remain\w*|stay\w*|still|contin\w*|keep\w*)\s+(?:\w+\s+){0,2}?(?:open|running|active|visible|alive|foreground)\b|\b(?:remains?|stays?)\s+(?:open|running|active)\b/i;
+  //    A control literally labelled "Close" is not a liveness claim, so the
+  //    vocabulary only counts when the clause is talking about the app itself.
+  const APP_SUBJECT = /\b(?:app|application|apk|it|screen|page|activity|session)\b/i;
+  const isLivenessClaim = pkg
+    && ((LIVENESS_VOCAB.test(clause) && APP_SUBJECT.test(clause)) || LIVENESS_PHRASE.test(clause));
+
+  if (isLivenessClaim) {
     // "The app crashed" is too serious a verdict to hang on one reading. A
     // window transition can briefly report the launcher (dumpsys falls back to
     // mFocusedApp while focus is null), so confirm the app is really gone
