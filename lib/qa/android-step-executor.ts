@@ -693,7 +693,11 @@ export async function validateAndroidExpectation(
   // Restoring the app is the engine's job, and it already does it: it re-anchors
   // with ensureAppForeground once per case. A validator's only job is to report
   // what is on screen — including, honestly, that the app was not on it.
-  const nodes = await dumpUi(serial);
+  // FRESH, always. A cached hierarchy can be up to the cache TTL old, so a
+  // verdict could be reached against the screen as it was BEFORE the action
+  // finished rendering — which is exactly how a case gets marked PASS while the
+  // device is still on its way to the expected screen.
+  const nodes = await dumpUi(serial, { fresh: true });
   const screenText = visibleText(nodes).toLowerCase();
   const fg = pkg ? await foregroundPackage(serial) : null;
 

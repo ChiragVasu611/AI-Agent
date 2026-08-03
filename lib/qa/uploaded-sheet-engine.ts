@@ -122,6 +122,45 @@ export interface AndroidRunTotals {
   verdictedCases: number;
 }
 
+/**
+ * Assert an Expected Result, giving the device time to actually GET there.
+ *
+ * A single evaluation immediately after an action races the app. Tapping a
+ * language and confirming it starts an activity transition that can take several
+ * seconds; the hierarchy a moment later is still the old screen, or a
+ * half-rendered intermediate one. Judged once, that produced both kinds of wrong
+ * answer: a FAIL for a screen that was about to appear, and — because an
+ * intermediate frame can satisfy a loose expectation — a PASS decided before the
+ * expected screen existed.
+ *
+ * So: re-read and re-evaluate until the expectation genuinely holds, and only
+ * conclude otherwise once the budget is spent. A pass returns the moment it is
+ * true (no added latency in the common case); a real failure still fails, just
+ * with the app given a fair chance first. Each attempt re-dumps fresh, so this
+ * tracks the live device rather than a cached snapshot.
+ */
+async function assertExpectation(
+  serial: string,
+  expectation: string,
+  pkg: string | null,
+  context: ValidationContext,
+  budgetMs = 12000,
+): Promise<{ v: Awaited<ReturnType<typeof validateAndroidExpectation>>; attempts: number; waitedMs: number }> {
+  const started = Date.now();
+  let attempts = 0;
+  let v = await validateAndroidExpectation(serial, expectation, pkg, context);
+  attempts += 1;
+
+  // Only a definitive PASS ends the wait early. fail and inconclusive are both
+  // worth retrying: the screen may still be arriving.
+  while (v.status !== 'pass' && Date.now() - started < budgetMs) {
+    await new Promise((r) => setTimeout(r, 400));
+    v = await validateAndroidExpectation(serial, expectation, pkg, context);
+    attempts += 1;
+  }
+  return { v, attempts, waitedMs: Date.now() - started };
+}
+
 export async function executeAndroidSuite(opts: {
   runId: string;
   run: any;
@@ -699,7 +738,12 @@ export async function executeAndroidSuite(opts: {
       // `verified` records that a human still needs to confirm the wording.
       let verified = false;
       if (judgedExpectation) {
-        const v = await validateAndroidExpectation(serial, judgedExpectation, pkg, transition);
+        const asserted = await assertExpectation(serial, judgedExpectation, pkg, transition);
+        const v = asserted.v;
+        if (asserted.attempts > 1) {
+          await log(runId, 'automation', 'debug',
+            `[${tc.testCaseId}] Step ${si + 1}: waited ${Math.round(asserted.waitedMs / 100) / 10}s over ${asserted.attempts} check(s) for the expected result to appear on screen.`);
+        }
         if (v.status === 'pass') {
           status = 'pass';
           verified = true;
@@ -881,7 +925,12 @@ export async function executeAndroidSuite(opts: {
             `[${tc.testCaseId}] The app had left the foreground before the expected result could be checked; brought it back: ${restored.message}`);
         }
       }
-      const v = await validateAndroidExpectation(serial, plan.caseLevel, pkg, lastTransition);
+      const assertedCase = await assertExpectation(serial, plan.caseLevel, pkg, lastTransition);
+      const v = assertedCase.v;
+      if (assertedCase.attempts > 1) {
+        await log(runId, 'automation', 'debug',
+          `[${tc.testCaseId}] Waited ${Math.round(assertedCase.waitedMs / 100) / 10}s over ${assertedCase.attempts} check(s) for the case's expected result to appear.`);
+      }
       if (v.status === 'fail') {
         finalResult = 'fail';
         finalActual = v.actual;
