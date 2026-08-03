@@ -650,6 +650,66 @@ export async function waitForUiChange(
   return { changed: uiSignature(nodes) !== beforeSignature, nodes };
 }
 
+/** Is the app's own process still alive on the device? */
+export async function isAppProcessAlive(serial: string, pkg: string): Promise<boolean> {
+  const out = await shell(serial, `pidof ${pkg}`, 10000).catch(() => '');
+  return out.trim().length > 0;
+}
+
+export interface AppAbsence {
+  /** The app is not the foreground app. */
+  absent: boolean;
+  /** Its process is gone entirely — it did not merely go to the background. */
+  processGone: boolean;
+  /** The device log recorded a real crash or ANR for this package. */
+  crashed: boolean;
+  /** What is in front instead. */
+  foreground: string | null;
+  detail: string;
+}
+
+/**
+ * Establish WHY the app is not in front, from the device's own evidence, before
+ * anyone decides to relaunch it.
+ *
+ * The engine used to skip this and simply relaunch on every sighting, which is
+ * what made the app open and close repeatedly: a crash-looping app was fought
+ * rather than diagnosed. Distinguishing "crashed", "process killed" and "merely
+ * backgrounded" is what lets the caller raise one honest Launch Failure instead.
+ */
+export async function diagnoseAppAbsence(serial: string, pkg: string): Promise<AppAbsence> {
+  const [fg, alive, crashes] = await Promise.all([
+    foregroundPackage(serial).catch(() => null),
+    isAppProcessAlive(serial, pkg),
+    detectCrashes(serial, pkg).catch(() => [] as CrashSignal[]),
+  ]);
+
+  const absent = fg !== pkg;
+  const crashed = crashes.length > 0;
+
+  let detail: string;
+  if (!absent) detail = 'The app is in the foreground.';
+  else if (crashed) detail = `The device log recorded a ${crashes[0].type.toUpperCase()} for ${pkg}.`;
+  else if (!alive) detail = `The process for ${pkg} is no longer running — it was terminated without leaving a crash trace (typically an OEM background/battery killer).`;
+  else detail = `${pkg} is still running but "${fg ?? 'another screen'}" is in front of it.`;
+
+  return { absent, processGone: !alive, crashed, foreground: fg, detail };
+}
+
+/**
+ * Bring an already-running app back to the front. One `am start`, no
+ * force-stop, no cold restart — the app keeps its process and its state, so the
+ * sheet continues in the same session rather than starting over.
+ */
+export async function bringToFrontOnce(
+  serial: string,
+  pkg: string,
+  timeoutMs = 6000,
+): Promise<boolean> {
+  await shell(serial, `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`, 20000).catch(() => '');
+  return waitForCondition(async () => (await foregroundPackage(serial)) === pkg, { timeoutMs, pollMs: 400 });
+}
+
 /**
  * Wait for the app to move past its splash/launch screen onto real content.
  * Returns once the activity changes away from the launch activity, or the view
@@ -663,16 +723,8 @@ export async function waitForAppReady(
 ): Promise<{ ready: boolean; activity: string | null; detail: string }> {
   const started = Date.now();
   const splashActivity = launchActivity;
-  // At most ONE relaunch per call. This guard lives outside the loop on
-  // purpose: the recovery below used to sit inside it, so an app that keeps
-  // self-exiting (an ad SDK tearing down its host Activity, or an OEM
-  // background killer) got relaunched on every iteration for the full timeout —
-  // which is exactly the "app repeatedly opening and closing" symptom. One
-  // attempt distinguishes a recoverable drift from a genuinely dead launch;
-  // repeating it just fights the thing that is killing the app.
-  let relaunched = false;
   // Ad-escape attempts made while waiting for readiness. Bounded so an ad that
-  // reappears on every relaunch cannot drive an endless exit/relaunch cycle.
+  // reappears cannot drive an endless dismiss cycle.
   const MAX_AD_ESCAPES = 2;
   let adEscapes = 0;
 
@@ -704,22 +756,15 @@ export async function waitForAppReady(
       // waits. But a plain re-launch reliably brings it straight back — the
       // same recovery `ensureAppForeground` already relies on when the app
       // drifts away mid-run. Try that once before declaring the launch dead.
-      if (fg !== pkg && launchActivity && !relaunched) {
-        relaunched = true;
-        await shell(serial, `am start -W -n ${launchActivity}`, 30000).catch(() => '');
-        const relaunchDeadline = Date.now() + 5000;
-        while (fg !== pkg && Date.now() < relaunchDeadline) {
-          await new Promise((r) => setTimeout(r, 500));
-          fg = await foregroundPackage(serial);
-        }
-      }
+      // Deliberately does NOT relaunch. This is a *wait*, and a wait that
+      // launches is how one launch turned into many: the caller launches, this
+      // relaunches, the caller's own recovery relaunches again. Report what was
+      // observed and let the single owner of launching decide.
       if (fg !== pkg) {
         return {
           ready: false,
           activity,
-          detail: relaunched
-            ? `The app left the foreground during startup (now: ${fg ?? 'unknown'}) and did not come back after a relaunch attempt. It may have crashed on launch.`
-            : `The app left the foreground during startup (now: ${fg ?? 'unknown'}). It may have crashed on launch.`,
+          detail: `The app left the foreground during startup (now: ${fg ?? 'unknown'}).`,
         };
       }
     }
@@ -1472,30 +1517,29 @@ export async function escapeAdSurface(
       };
     }
     sawAd = true;
-    const dismissed = await dismissBlockingOverlay(serial, 1);
-    if (dismissed.handled.length === 0) {
-      // No labelled close/skip control (often true — an interstitial's own X
-      // icon is frequently invisible to the accessibility tree even though it
-      // is visibly on screen). Back out rather than tap anywhere on the ad's
-      // own creative — BACK genuinely dismisses an interstitial that is layered
-      // over a running app.
-      await pressKey(serial, 'KEYCODE_BACK');
-      // ...but stop immediately if that BACK took the app with it. Pressing it
-      // again would only keep exiting whatever the caller relaunches.
-      if (pkg && (await foregroundPackage(serial)) !== pkg) {
-        return {
-          escaped: false,
-          detail: `Backing out of the advertisement exited the app itself ("${pkg}" is no longer in the foreground), so no further back-presses were attempted. This interstitial is shown on the app's launch screen, which has nothing behind it to return to.`,
-        };
-      }
-    }
-    await new Promise((r) => setTimeout(r, 1200));
+    // Tap the ad's OWN close/skip control if one is exposed. Nothing else.
+    //
+    // There used to be a KEYCODE_BACK fallback here for interstitials whose X
+    // is invisible to the accessibility tree. Measured on a real device, that
+    // was the single biggest cause of the "app repeatedly opens and closes"
+    // report: this app shows its interstitial as an AdActivity on top of a
+    // splash that has already finished, so BACK does not return to the app —
+    // it exits the app. The engine then relaunched, drew another interstitial,
+    // pressed BACK again, and so on. Left alone the same app stays up happily
+    // (verified: same pid for 60s, zero crashes), so pressing BACK was
+    // manufacturing the very instability it then reported.
+    //
+    // Waiting is the correct behaviour instead: interstitials enable their own
+    // close control after a few seconds. If it never becomes reachable we say
+    // so honestly rather than destroying the session to get past it.
+    await dismissBlockingOverlay(serial, 1);
+    await new Promise((r) => setTimeout(r, 1500));
   }
   const stillAd = await adSurfacePresent(serial);
   return {
     escaped: !stillAd,
     detail: stillAd
-      ? `An advertisement is still on screen after ${maxAttempts} dismissal attempts.`
+      ? `A full-screen advertisement is still covering the app after ${maxAttempts} attempts to close it, and it exposes no close control this engine can reach. The app itself is unaffected — it is simply behind the ad.`
       : `Advertisement cleared after ${maxAttempts} dismissal attempt(s).`,
   };
 }

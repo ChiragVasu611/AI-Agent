@@ -15,6 +15,7 @@ import { interpretStepParts } from '@/lib/qa/step-interpreter';
 import {
   captureDeviceScreen, detectCrashes, crashSignature, readLogcat, stopApp, ensureAppForeground,
   dismissBlockingOverlay, advancePastGateScreen, escapeAdSurface, foregroundPackage, launchApp,
+  diagnoseAppAbsence, bringToFrontOnce,
   type CrashSignal,
 } from '@/lib/qa/android-bridge';
 import { planExpectations } from '@/lib/qa/expected-results';
@@ -340,27 +341,65 @@ export async function executeAndroidSuite(opts: {
       // Warm re-front only. If the app is already showing, this is a no-op; if a
       // stray tap opened a browser or a share sheet, it backs out and re-fronts
       // the SAME task, preserving where the sheet had got to.
+      // One launch per RUN, not per case.
+      //
+      // Previously a case that found the app missing was allowed one cold
+      // restart. Bounded per case, but across a suite of 21 cases against an app
+      // that exits on its own that is still up to 21 force-stop/relaunch cycles
+      // — which is exactly the "app repeatedly opens and closes" report. The
+      // engine was fighting the app instead of reporting on it.
+      //
+      // The policy now: only ever re-front an app that is still ALIVE (a warm
+      // `am start`, same process, same session). If the process is gone or the
+      // log shows a crash, that is a finding — raise it once, stop the suite,
+      // and never relaunch.
       let anchor = await refocusApp(serial, pkg, !isAdCase);
 
-      // A warm re-front cannot rescue a process that died, nor an app that has
-      // been pushed out to the launcher and will not come back. Either way the
-      // alternative is reporting the case BLOCKED having executed nothing, so a
-      // cold restart is authorised here — ONCE, at the start of a case, never
-      // per step.
-      //
-      // That bound is the whole point. The original defect was a force-stop on
-      // every re-anchor, which made the app visibly open and close throughout a
-      // run; one restart for a case that would otherwise be unrunnable is a
-      // different thing, and it is logged so it is never invisible.
       if (!anchor.ok && !anchor.deviceLost) {
-        const crashed = await newCrashes();
-        const why = crashed.length > 0
-          ? `the app ${crashed[0].type === 'crash' ? 'crashed' : 'stopped responding (ANR)'}`
-          : 'the app could not be brought back to the foreground';
-        await log(runId, 'automation', 'warn',
-          `[${tc.testCaseId}] Restarting the app once before this test case because ${why}. `
-          + 'Without this the case could not run at all; the session is otherwise kept for the whole suite.');
-        anchor = await recoverFromCrash(serial, pkg, !isAdCase);
+        const absence = await diagnoseAppAbsence(serial, pkg);
+        const fresh = await newCrashes();
+
+        if (absence.crashed || absence.processGone) {
+          // A genuine launch/stability failure. File ONE Issue with the real
+          // device evidence and stop, rather than restarting into the same wall
+          // for every remaining case.
+          const shot = await captureDeviceScreen(serial);
+          const screen = await currentAndroidScreen(serial);
+          await fileBug({
+            tc,
+            stepNumber: null,
+            instruction: null,
+            expected: 'The application stays running so its test cases can be executed.',
+            actual: `Launch failure: ${absence.detail} The suite was stopped here — the engine does not relaunch a crashing app.`,
+            screen,
+            evidence: shot,
+            crashes: fresh,
+            stepRecords: [],
+          });
+
+          const reason = `Blocked: ${absence.detail} Execution stopped so the application can be fixed; the engine deliberately does not relaunch a crashing app.`;
+          for (let rest = i; rest < cases.length; rest++) {
+            const other = cases[rest];
+            other.result = 'blocked';
+            other.actualResult = reason;
+            other.failedStepIndex = null;
+            other.screenName = screen;
+            other.stepResults = [];
+            await other.save();
+            blocked += 1;
+          }
+          run.blockedCases = blocked;
+          await run.save();
+          await log(runId, 'error', 'error',
+            `Execution stopped at ${tc.testCaseId} (${i + 1}/${cases.length}): ${absence.detail} A Launch Failure issue was raised; the remaining case(s) are blocked rather than relaunching the app repeatedly.`);
+          break;
+        }
+
+        // Alive, just not in front — a warm re-front is safe and keeps the
+        // session. No force-stop, so the app never "closes" here.
+        if (await bringToFrontOnce(serial, pkg)) {
+          anchor = { ok: true, recovered: true, detail: `The app had moved behind "${absence.foreground ?? 'another screen'}" and was brought back to the front without restarting it.` };
+        }
       }
 
       if (anchor.recovered || !anchor.ok) {
@@ -497,11 +536,18 @@ export async function executeAndroidSuite(opts: {
         if (prior && prior.status !== 'pass') {
           const back = await refocusApp(serial, pkg, !isAdCase);
           if (!back.ok && !back.deviceLost) {
-            const crashed = await newCrashes();
-            if (crashed.length > 0) {
+            // NEVER restart between steps. A cold restart here throws away the
+            // session the sheet has been walking through — the next step would
+            // run against a first-run splash rather than the screen it expects —
+            // and on an app that exits repeatedly it is the per-step half of the
+            // open/close cycle. If the app is alive, re-front it; if it is gone,
+            // say so and let the remaining steps report honestly.
+            const absence = await diagnoseAppAbsence(serial, pkg);
+            if (!absence.processGone && !absence.crashed) {
+              await bringToFrontOnce(serial, pkg);
+            } else {
               await log(runId, 'automation', 'warn',
-                `[${tc.testCaseId}] Step ${si + 1}: the app ${crashed[0].type === 'crash' ? 'crashed' : 'became unresponsive'} during the previous step — restarting before continuing.`);
-              await recoverFromCrash(serial, pkg, !isAdCase);
+                `[${tc.testCaseId}] Step ${si + 1}: ${absence.detail} The app is not being relaunched mid-case; the remaining steps of this case will report that it was not on screen.`);
             }
           } else if (back.recovered) {
             await log(runId, 'automation', 'debug', `[${tc.testCaseId}] Step ${si + 1}: ${back.detail}`);

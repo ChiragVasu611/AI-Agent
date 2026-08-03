@@ -14,6 +14,7 @@ import {
 } from '@/lib/qa/web-step-executor';
 import { log } from '@/lib/qa/runtime-helpers';
 import { scanDevices } from '@/lib/qa/device-detect';
+import { readLogcat } from '@/lib/qa/android-bridge';
 import { prepareAndroidBinary, prepareFromPlayStore, prepareFromAppStore } from '@/lib/qa/app-preparation';
 import { executeAndroidSuite } from '@/lib/qa/uploaded-sheet-engine';
 import { onRunCompleted } from '@/lib/issue-boards/sync';
@@ -388,6 +389,39 @@ async function runOnAndroidDevice(
     }
     run.engineMode = 'blocked_no_runtime';
     await run.save();
+
+    // Raise a real Issue for a launch failure, with the device's own evidence.
+    // Blocking 21 cases with a log line left the most important finding of the
+    // run — the app cannot be started — invisible on the Issue Board.
+    try {
+      const deviceLog = await readLogcat(device.id, 120).catch(() => '');
+      await QaBug.create({
+        userId: run.userId, projectId: run.projectId, runId,
+        type: /crash|anr|not responding/i.test(String(prep.blockedReason)) ? 'crash' : 'functional',
+        module: 'Application Launch', feature: 'Startup',
+        severity: 'critical', priority: 'p1',
+        bugNumber: `BUG-${run.runNumber}-001`,
+        testCaseId: cases[0]?.testCaseId ?? null,
+        failedStepNumber: null,
+        title: 'Launch failure — the application could not be started for testing',
+        description: `Preparation completed installation but the app could not be brought to a usable state on ${deviceLabel}, so no test case could run. ${prep.blockedReason}`,
+        screenName: 'Application launch',
+        stepsToReproduce: ['Install the application on the device', 'Launch it from the launcher icon', 'Observe that it does not stay in the foreground'],
+        expectedResult: 'The application launches and stays in the foreground so its test cases can be executed.',
+        actualResult: String(prep.blockedReason ?? 'The application did not reach a usable state.'),
+        screenshotDataUrl: prep.screenshot ?? null,
+        logs: [`Device: ${deviceLabel}`, '', '--- logcat (last 120 lines) ---', String(deviceLog).slice(0, 6000)].join('\n'),
+        stackTrace: null, apiRequest: null, apiResponse: null,
+        deviceInfo: deviceLabel, osVersion: run.currentDevice ?? '', appVersion: run.buildVersion,
+        aiRootCause: 'The application did not remain in the foreground after launch. Common causes are a crash during startup, an OEM battery/autostart policy terminating a freshly installed app, or an integrity check rejecting a sideloaded build.',
+        suggestedFix: 'Reproduce the launch manually on the same device and capture `adb shell dumpsys activity exit-info <package>` for the OS-recorded exit reason. If it is an OEM policy, allow background activity and autostart for the app; if it is an integrity check, install the build through its normal distribution channel.',
+      });
+      run.bugsFound = (run.bugsFound ?? 0) + 1;
+      await run.save();
+    } catch {
+      // An Issue is evidence, not a precondition — never let it mask the block.
+    }
+
     await blockAll(runId, run, cases, `Execution blocked before it began: ${prep.blockedReason}`, project.name);
     return;
   }
