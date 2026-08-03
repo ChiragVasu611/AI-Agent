@@ -40,3 +40,6 @@ next-env.d.ts
 
 # QA uploaded app binaries (kept out of git; needed on disk so ADB can install them)
 /.qa-uploads/
+
+# QA evidence store (screenshots/recordings kept out of the database)
+.qa-evidence/

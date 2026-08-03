@@ -40,6 +40,20 @@ function elapsedLabel(startedAt: string | null): string {
   return `${m}m ${s}s`;
 }
 
+/**
+ * Source for one evidence frame.
+ *
+ * Prefers the streaming endpoint, which serves the bytes from the evidence store
+ * with an immutable cache — so a frame is downloaded once no matter how often the
+ * live run re-polls. Falls back to an inline payload only for frames that still
+ * carry one (captured before evidence moved out of the database).
+ */
+function frameSrc(shot: { id?: string; url?: string | null; imageDataUrl?: string | null }): string {
+  if (shot.url) return shot.url;
+  if (shot.id) return `/api/qa/evidence/${shot.id}`;
+  return shot.imageDataUrl ?? '';
+}
+
 /** Seconds a run actually took: frozen at completedAt once finished. */
 function executionSeconds(startedAt: string | null, completedAt: string | null): number | null {
   if (!startedAt) return null;
@@ -62,6 +76,16 @@ const STATUS_COLOR: Record<string, string> = {
   failed: 'bg-destructive/15 text-destructive',
   partial: 'bg-amber-500/15 text-amber-500',
   cancelled: 'bg-secondary text-muted-foreground',
+  // Not executed at all — visually distinct from failed, which means the app WAS
+  // executed and misbehaved.
+  blocked: 'bg-amber-500/15 text-amber-600 border border-amber-500/30',
+};
+
+/** Human label for the three ways a run can be blocked. */
+const BLOCKED_ENGINE_LABEL: Record<string, string> = {
+  blocked_no_runtime: 'No runtime available',
+  unsupported_platform: 'Platform not supported',
+  runtime_unavailable: 'Runtime dependency missing',
 };
 
 export default function QaRunPage() {
@@ -79,6 +103,8 @@ export default function QaRunPage() {
   const [bugs, setBugs] = useState<any[]>([]);
   const [testCases, setTestCases] = useState<any[]>([]);
   const [detailTab, setDetailTab] = useState('results');
+  /** Frame opened in the full-screen viewer, or null when it's closed. */
+  const [zoomed, setZoomed] = useState<any>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -184,6 +210,14 @@ export default function QaRunPage() {
   const isRealDevice = run.engineMode === 'real_device';
   const isRealEngine = run.engineMode === 'real_browser' || run.engineMode === 'real_device';
   const latestShot = screenshots.length > 0 ? screenshots[screenshots.length - 1] : null;
+  /** Real device/browser properties measured by the engine; fields may be null. */
+  const dev = (run.deviceInfo ?? {}) as {
+    model?: string | null; osVersion?: string | null; sdkInt?: number | null;
+    widthPx?: number | null; heightPx?: number | null; densityDpi?: number | null;
+    batteryPct?: number | null; batteryTempC?: number | null; charging?: boolean | null;
+    memoryPssKb?: number | null; cpuAppPct?: number | null;
+    networkType?: string | null; rotationDegrees?: number | null; platform?: string | null;
+  };
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6 lg:p-8">
@@ -223,6 +257,30 @@ export default function QaRunPage() {
           Delete
         </Button>
       </div>
+
+      {/* A blocked run executed NOTHING. Say so at the top, in full, before any
+          panel that could be mistaken for a result — the report below is empty
+          by design, and the reason is the only finding this run produced. */}
+      {run.status === 'blocked' && (
+        <Card className="border-amber-500/40 bg-amber-500/5 p-5">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+            <div className="min-w-0 flex-1">
+              <h2 className="font-display text-sm font-semibold text-amber-700 dark:text-amber-400">
+                Not executed — {BLOCKED_ENGINE_LABEL[run.engineMode] ?? 'Blocked'}
+              </h2>
+              <p className="mt-1.5 text-xs leading-relaxed text-foreground/80">
+                {run.errorMessage ?? 'This run could not be executed against the target.'}
+              </p>
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                No test results, bugs, screenshots or scores were recorded, because the application was
+                never run. This platform reports what it measured and nothing else — see Live Logs for the
+                steps needed to make this target executable.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Execution Summary + Device Information — unchanged from the original run monitor. */}
       <div className="grid gap-6 lg:grid-cols-3">
@@ -280,7 +338,7 @@ export default function QaRunPage() {
                 <div className="grid aspect-[16/10] max-h-72 place-items-center overflow-hidden bg-white dark:bg-neutral-900">
                   {latestShot ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={latestShot.imageDataUrl} alt="Latest captured page" className="h-full w-full object-contain object-top" />
+                    <img src={frameSrc(latestShot)} alt="Latest captured page" className="h-full w-full object-contain object-top" />
                   ) : (
                     <Globe className="h-10 w-10 text-muted-foreground" />
                   )}
@@ -289,7 +347,7 @@ export default function QaRunPage() {
               <div className="mt-3 space-y-1.5 text-xs">
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Engine</span><span className="truncate">{run.currentDevice ?? 'Headless Chromium'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Current URL</span><span className="max-w-[65%] truncate" title={run.currentScreen ?? undefined}>{run.currentScreen ?? '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Viewport</span><span>1366×900</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Viewport</span><span>{dev.widthPx && dev.heightPx ? `${dev.widthPx}×${dev.heightPx}` : '—'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Pages Visited</span><span>{screenshots.length}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Status</span><span>{isLive ? 'Running' : 'Finished'}</span></div>
               </div>
@@ -306,21 +364,25 @@ export default function QaRunPage() {
                 <div className="relative grid aspect-[9/16] max-h-72 w-40 place-items-center overflow-hidden rounded-[1.25rem] bg-secondary/20">
                   {latestShot ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={latestShot.imageDataUrl} alt="Latest device screenshot" className="h-full w-full object-contain" />
+                    <img src={frameSrc(latestShot)} alt="Latest device screenshot" className="h-full w-full object-contain" />
                   ) : (
                     <Smartphone className="h-10 w-10 text-muted-foreground" />
                   )}
                 </div>
               </div>
+              {/* Every value below is read off the real device by the engine and
+                  stored on the run. A field the device did not report shows "—"
+                  rather than a stand-in figure. */}
               <div className="mt-3 space-y-1.5 text-xs">
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Platform</span><span>{isIOS ? 'iOS' : 'Android'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Device</span><span>{run.currentDevice ?? '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Battery className="h-3 w-3" /> Battery</span><span>{isLive ? '78%' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Cpu className="h-3 w-3" /> CPU</span><span>{isLive ? '34%' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><MemoryStick className="h-3 w-3" /> Memory</span><span>{isLive ? '512 MB' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Signal className="h-3 w-3" /> Network</span><span>{isLive ? 'Wi-Fi' : '—'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Resolution</span><span>{isIOS ? '1170x2532' : '1080x2400'}</span></div>
-                <div className="flex items-center justify-between"><span className="text-muted-foreground">Orientation</span><span>Portrait</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Platform</span><span>{dev.platform ? (dev.platform === 'android' ? 'Android' : dev.platform === 'ios' ? 'iOS' : dev.platform) : (isIOS ? 'iOS' : 'Android')}</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Device</span><span className="max-w-[65%] truncate" title={run.currentDevice ?? undefined}>{run.currentDevice ?? dev.model ?? '—'}</span></div>
+                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Battery className="h-3 w-3" /> Battery</span><span>{dev.batteryPct != null ? `${dev.batteryPct}%${dev.charging ? ' (charging)' : ''}` : '—'}</span></div>
+                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Cpu className="h-3 w-3" /> CPU</span><span>{dev.cpuAppPct != null ? `${dev.cpuAppPct}%` : '—'}</span></div>
+                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><MemoryStick className="h-3 w-3" /> Memory</span><span>{dev.memoryPssKb != null ? `${(dev.memoryPssKb / 1024).toFixed(0)} MB` : '—'}</span></div>
+                <div className="flex items-center justify-between"><span className="flex items-center gap-1 text-muted-foreground"><Signal className="h-3 w-3" /> Network</span><span>{dev.networkType ?? '—'}</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Resolution</span><span>{dev.widthPx && dev.heightPx ? `${dev.widthPx}x${dev.heightPx}` : '—'}</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Density</span><span>{dev.densityDpi != null ? `${dev.densityDpi} dpi` : '—'}</span></div>
+                <div className="flex items-center justify-between"><span className="text-muted-foreground">Orientation</span><span>{dev.rotationDegrees != null ? (dev.rotationDegrees % 180 === 0 ? 'Portrait' : 'Landscape') : '—'}</span></div>
                 <div className="flex items-center justify-between"><span className="text-muted-foreground">Status</span><span>{isLive ? 'Online' : 'Offline'}</span></div>
               </div>
               <p className="mt-3 text-[11px] text-muted-foreground">
@@ -425,7 +487,22 @@ export default function QaRunPage() {
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
                 {screenshots.map((s: any) => (
                   <div key={s.id} className="overflow-hidden rounded-lg border border-border">
-                    <img src={s.imageDataUrl} alt={s.screenName} className="h-28 w-full object-cover" />
+                    <button
+                      type="button"
+                      onClick={() => setZoomed(s)}
+                      className="block w-full cursor-zoom-in"
+                      aria-label={`Enlarge screenshot of ${s.screenName}`}
+                    >
+                      <img
+                        src={frameSrc(s)}
+                        alt={s.screenName}
+                        loading="lazy"
+                        decoding="async"
+                        width={s.width ?? undefined}
+                        height={s.height ?? undefined}
+                        className="h-28 w-full object-cover transition hover:opacity-90"
+                      />
+                    </button>
                     <div className="p-1.5">
                       <div className="truncate text-[10px] font-medium">{s.screenName}</div>
                       <div className="truncate text-[9px] text-muted-foreground">{new Date(s.createdAt).toLocaleTimeString()}</div>
@@ -443,7 +520,7 @@ export default function QaRunPage() {
               <div className="space-y-2">
                 {executionTimeline.map((e: any) => (
                   <div key={e.id} className="flex items-center gap-3 rounded-lg border border-border p-2.5">
-                    <img src={e.imageDataUrl} alt={e.screenName} className="h-12 w-8 shrink-0 rounded object-cover" />
+                    <img src={frameSrc(e)} alt={e.screenName} loading="lazy" decoding="async" className="h-12 w-8 shrink-0 rounded object-cover" />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 text-xs">
                         <span className="text-muted-foreground">#{e.stepNumber}</span>
@@ -496,6 +573,56 @@ export default function QaRunPage() {
           </TabsContent>
         </Tabs>
       </Card>
+
+      {/* Full-screen frame viewer. The image is fetched at full resolution only
+          when a frame is actually opened — the gallery itself renders thumbnails
+          from the same immutably-cached URL. */}
+      {zoomed && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Screenshot of ${zoomed.screenName}`}
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
+          onClick={() => setZoomed(null)}
+        >
+          <div className="mb-3 flex w-full max-w-5xl items-start justify-between gap-4 text-white">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium">{zoomed.screenName}</div>
+              <div className="truncate text-xs text-white/70">
+                {zoomed.testStep ? `${zoomed.testStep} · ` : ''}
+                {new Date(zoomed.createdAt).toLocaleString()}
+                {zoomed.width && zoomed.height ? ` · ${zoomed.width}×${zoomed.height}` : ''}
+                {zoomed.bytes ? ` · ${Math.round(zoomed.bytes / 1024)} KB` : ''}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <a
+                href={frameSrc(zoomed)}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="rounded-md border border-white/25 px-2.5 py-1 text-xs transition hover:bg-white/10"
+              >
+                Open original
+              </a>
+              <button
+                type="button"
+                onClick={() => setZoomed(null)}
+                className="rounded-md border border-white/25 px-2.5 py-1 text-xs transition hover:bg-white/10"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={frameSrc(zoomed)}
+            alt={zoomed.screenName}
+            className="max-h-[80vh] max-w-full rounded-lg object-contain shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
     </div>
   );
 }
