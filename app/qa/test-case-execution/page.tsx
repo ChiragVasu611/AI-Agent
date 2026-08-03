@@ -11,7 +11,7 @@ import {
 import { toast } from 'sonner';
 import { startUploadedTestExecution } from '@/app/qa/actions';
 import { cancelQaTestRun } from '@/app/qa/runs/actions';
-import { submitBinaryRun } from '@/lib/qa/submit-binary-run';
+import { submitBinaryRun, type SubmitProgress } from '@/lib/qa/submit-binary-run';
 import { attachSelectedDevice } from '@/lib/qa/selected-device';
 import { SelectedDeviceBanner } from '@/components/modules/qa/selected-device-banner';
 import { exportCsv, exportExcel } from '@/lib/qa/export';
@@ -271,6 +271,12 @@ export default function TestCaseExecutionPage() {
   const [testCases, setTestCases] = useState<any[]>([]);
   /** Freshly captured device frame while a run is live; falls back to the last
    *  stored step screenshot once the run finishes. */
+  /**
+   * Upload progress for the Start Execution button. A 100MB+ APK takes tens of
+   * seconds to reach the server and that wait used to be an indefinite spinner,
+   * which is indistinguishable from the app having hung.
+   */
+  const [uploadProgress, setUploadProgress] = useState<SubmitProgress | null>(null);
   const [liveFrame, setLiveFrame] = useState<string | null>(null);
   /**
    * The live snapshot that came back WITH the frame above — module, test case,
@@ -449,8 +455,9 @@ export default function TestCaseExecutionPage() {
       // server action, since server actions in this Next.js version cap request
       // bodies at 1MB — far too small for a real app binary.
       const res = isBinarySource
-        ? await submitBinaryRun(formData)
+        ? await submitBinaryRun(formData, setUploadProgress)
         : await startUploadedTestExecution(formData);
+      setUploadProgress(null);
       if (res?.error) {
         toast.error(res.error);
         return;
@@ -802,8 +809,31 @@ export default function TestCaseExecutionPage() {
                   <SelectedDeviceBanner show={isBinarySource || (platform === 'android' && androidMode === 'url')} />
                   <Button type="submit" disabled={pending} className="w-full gap-2">
                     {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                    Start Execution
+                    {/*
+                      A 100MB+ APK takes tens of seconds to reach the server, and
+                      that used to be an unlabelled spinner — indistinguishable
+                      from a hang. Report the actual percentage while bytes are
+                      moving, then say the server is working, so the wait is
+                      always accounted for.
+                    */}
+                    {!pending && 'Start Execution'}
+                    {pending && !uploadProgress && 'Starting…'}
+                    {pending && uploadProgress?.processing && 'Preparing run on the server…'}
+                    {pending && uploadProgress && !uploadProgress.processing && (
+                      uploadProgress.percent != null
+                        ? `Uploading app… ${uploadProgress.percent}%`
+                        : 'Uploading app…'
+                    )}
                   </Button>
+                  {pending && uploadProgress && !uploadProgress.processing && uploadProgress.percent != null && (
+                    <>
+                      <Progress value={uploadProgress.percent} className="h-1.5" />
+                      <p className="text-center text-[11px] text-muted-foreground">
+                        {(uploadProgress.loadedBytes / 1048576).toFixed(0)}MB of {(uploadProgress.totalBytes / 1048576).toFixed(0)}MB sent —
+                        {' '}execution begins automatically once the upload completes.
+                      </p>
+                    </>
+                  )}
                 </div>
               </form>
             </Card>
